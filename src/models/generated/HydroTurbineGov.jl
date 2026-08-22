@@ -40,14 +40,14 @@ Hydro Turbine-Governor
 - `D_T::Float64`: Turbine Damping, validation range: `(0, 0.5)`
 - `q_nl::Float64`: No-power flow, validation range: `(0, nothing)`
 - `P_ref::Float64`: (default: `1.0`) Reference Power Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) of the HydroTurbineGov model are:
 	x_g1: filter_output,
 	x_g2: desired gate, 
 	x_g3: gate opening, 
 	x_g4: turbine flow
 - `n_states::Int`: (**Do not modify.**) HYGOV has 4 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) HYGOV has 4 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) HYGOV has 4 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct HydroTurbineGov <: TurbineGov
@@ -75,7 +75,7 @@ mutable struct HydroTurbineGov <: TurbineGov
     q_nl::Float64
     "Reference Power Set-point (pu)"
     P_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) of the HydroTurbineGov model are:
 	x_g1: filter_output,
@@ -85,7 +85,7 @@ mutable struct HydroTurbineGov <: TurbineGov
     states::Vector{Symbol}
     "(**Do not modify.**) HYGOV has 4 states"
     n_states::Int
-    "(**Do not modify.**) HYGOV has 4 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) HYGOV has 4 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

@@ -56,7 +56,7 @@ IEEE Type 1 Speed-Governing Model
 - `K7::Float64`: Fraction of high presure shaft power fourth boiler pass, validation range: `(0, 0.3)`
 - `K8::Float64`: Fraction of low presure shaft power fourth boiler pass, validation range: `(0, 0.3)`
 - `P_ref::Float64`: (default: `1.0`) Reference Power Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) of the IEEETurbineGov model are:
 	x_g1: First Governor integrator,
 	x_g2: Governor output,
@@ -65,7 +65,7 @@ IEEE Type 1 Speed-Governing Model
 	x_g5: Third Turbine Integrator, 
 	x_g6: Fourth Turbine Integrator, 
 - `n_states::Int`: (**Do not modify.**) IEEEG1 has 6 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEG1 has 6 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEG1 has 6 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct IEEETurbineGov1 <: TurbineGov
@@ -109,7 +109,7 @@ mutable struct IEEETurbineGov1 <: TurbineGov
     K8::Float64
     "Reference Power Set-point (pu)"
     P_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) of the IEEETurbineGov model are:
 	x_g1: First Governor integrator,
@@ -121,7 +121,7 @@ mutable struct IEEETurbineGov1 <: TurbineGov
     states::Vector{Symbol}
     "(**Do not modify.**) IEEEG1 has 6 states"
     n_states::Int
-    "(**Do not modify.**) IEEEG1 has 6 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) IEEEG1 has 6 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

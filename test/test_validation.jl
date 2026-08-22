@@ -2,7 +2,6 @@ import YAML
 
 const WRONG_FORMAT_CONFIG_FILE =
     joinpath(dirname(pathof(PowerSystems)), "descriptors", "config.yml")
-include(joinpath(DATA_DIR, "psy_data", "data_5bus_pu.jl"))
 
 @testset "Test reading in config data" begin
     data = IS.read_validation_descriptor(PSY.POWER_SYSTEM_STRUCT_DESCRIPTOR_FILE)
@@ -157,9 +156,21 @@ end
 
     add_component!(
         sys,
-        ACBus(11, "11", ACBusTypes.PQ, 1, 1, (min = 0.9, max = 1.1), 123, nothing, nothing),
+        ACBus(
+            11,
+            "11",
+            true,
+            ACBusTypes.PQ,
+            1,
+            1,
+            (min = 0.9, max = 1.1),
+            123,
+            nothing,
+            nothing,
+        ),
     )
     B = collect(get_components(ACBus, sys))
+    sort!(B, by = get_number)
     a = Arc(B[1], B[6])
     badline = Line(
         "badline",
@@ -187,7 +198,18 @@ end
 
     add_component!(
         sys,
-        ACBus(11, "11", ACBusTypes.PQ, 1, 1, (min = 0.9, max = 1.1), 123, nothing, nothing),
+        ACBus(
+            11,
+            "11",
+            true,
+            ACBusTypes.PQ,
+            1,
+            1,
+            (min = 0.9, max = 1.1),
+            123,
+            nothing,
+            nothing,
+        ),
     )
     path = joinpath(mktempdir(), "test_validation.json")
     try
@@ -201,6 +223,7 @@ end
         sys2 = PSY.System(path)
 
         B = collect(get_components(ACBus, sys2))
+        sort!(B, by = get_number)
         a = Arc(B[1], B[6])
         badline = Line(
             "badline",
@@ -228,6 +251,7 @@ function _make_bus()
     return ACBus(;
         number = 1,
         name = "bus1",
+        available = true,
         bustype = ACBusTypes.REF,
         angle = 0.0,
         magnitude = 0.0,
@@ -246,7 +270,7 @@ end
     remove_component!(sys, bus)
 
     # Make the bus invalid.
-    set_angle!(bus, 1000.0)
+    set_base_voltage!(bus, -1000.0)
     @test_logs(
         (:error, r"Invalid range"),
         match_mode = :any,
@@ -263,7 +287,7 @@ end
     bus = _make_bus()
 
     # Make the bus invalid.
-    set_angle!(bus, 1000.0)
+    set_base_voltage!(bus, -1000.0)
     add_component!(sys, bus)
 end
 
@@ -272,7 +296,7 @@ end
     bus = _make_bus()
 
     # Make the bus invalid.
-    set_angle!(bus, 1000.0)
+    set_base_voltage!(bus, -1000.0)
     add_component!(sys, bus)
 
     @test_logs(
@@ -317,7 +341,7 @@ end
     bus = _make_bus()
 
     # Make the bus invalid.
-    set_angle!(bus, 1000.0)
+    set_base_voltage!(bus, -1000.0)
     add_component!(sys, bus)
 
     @test_logs(

@@ -46,7 +46,7 @@ Woodward PID Hydro Governor
 - `gate_openings::Tuple{Float64, Float64, Float64}`: Gate-opening speed at different loads
 - `power_gate_openings::Tuple{Float64, Float64, Float64}`: Power at gate_openings
 - `P_ref::Float64`: (default: `1.0`) Reference Power Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) of the PIDGOV model are:
 	x_g1: Filtered input measurement,
 	x_g2: PI block internal state,
@@ -56,7 +56,7 @@ Woodward PID Hydro Governor
 	x_g6: Gate position state, 
 	x_g7: Water inertia state
 - `n_states::Int`: (**Do not modify.**) PIDGOV has 7 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) PIDGOV has 7 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) PIDGOV has 7 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct WPIDHY <: TurbineGov
@@ -90,7 +90,7 @@ mutable struct WPIDHY <: TurbineGov
     power_gate_openings::Tuple{Float64, Float64, Float64}
     "Reference Power Set-point (pu)"
     P_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) of the PIDGOV model are:
 	x_g1: Filtered input measurement,
@@ -103,7 +103,7 @@ mutable struct WPIDHY <: TurbineGov
     states::Vector{Symbol}
     "(**Do not modify.**) PIDGOV has 7 states"
     n_states::Int
-    "(**Do not modify.**) PIDGOV has 7 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) PIDGOV has 7 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

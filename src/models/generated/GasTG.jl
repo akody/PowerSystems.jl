@@ -34,13 +34,13 @@ Parameters of Gas Turbine-Governor. GAST in PSSE and GAST_PTI in PowerWorld
 - `V_lim::Tuple{Float64, Float64}`: Operational control limits on fuel valve opening (V_min, V_max)
 - `D_turb::Float64`: Speed damping coefficient of gas turbine rotor, validation range: `(0, 0.5)`
 - `P_ref::Float64`: (default: `1.0`) Reference Load Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) of the GAST model are:
 	x_g1: Fuel valve opening,
 	x_g2: Fuel flow,
 	x_g3: Exhaust temperature load
 - `n_states::Int`: (**Do not modify.**) GasTG has 3 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) GAST has 3 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) GAST has 3 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct GasTG <: TurbineGov
@@ -62,7 +62,7 @@ mutable struct GasTG <: TurbineGov
     D_turb::Float64
     "Reference Load Set-point (pu)"
     P_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) of the GAST model are:
 	x_g1: Fuel valve opening,
@@ -71,7 +71,7 @@ mutable struct GasTG <: TurbineGov
     states::Vector{Symbol}
     "(**Do not modify.**) GasTG has 3 states"
     n_states::Int
-    "(**Do not modify.**) GAST has 3 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) GAST has 3 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

@@ -68,7 +68,7 @@ IEEE 421.5 2005 PSS2B IEEE Dual-Input Stabilizer Model
 - `Vs1_lim::Tuple{Float64, Float64}`: First input limits `(Vs1_min, Vs1_max)`
 - `Vs2_lim::Tuple{Float64, Float64}`: Second input limits `(Vs2_min, Vs2_max)`
 - `Vst_lim::Tuple{Float64, Float64}`: PSS output limits `(Vst_min, Vst_max)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) are:
 	x_p1: 1st washout 1st input, 
 	x_p2: 2nd washout 1st input, 
@@ -88,7 +88,7 @@ IEEE 421.5 2005 PSS2B IEEE Dual-Input Stabilizer Model
 	x_p16: 2nd lead-lag, 
 	x_p17: 3rd lead-lag,
 - `n_states::Int`: (**Do not modify.**) IEEEST has 17 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEST has 17 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEST has 17 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct PSS2B <: PSS
@@ -144,7 +144,7 @@ mutable struct PSS2B <: PSS
     Vs2_lim::Tuple{Float64, Float64}
     "PSS output limits `(Vst_min, Vst_max)`"
     Vst_lim::Tuple{Float64, Float64}
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) are:
 	x_p1: 1st washout 1st input, 
@@ -167,7 +167,7 @@ mutable struct PSS2B <: PSS
     states::Vector{Symbol}
     "(**Do not modify.**) IEEEST has 17 states"
     n_states::Int
-    "(**Do not modify.**) IEEEST has 17 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) IEEEST has 17 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

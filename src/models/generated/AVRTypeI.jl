@@ -38,14 +38,14 @@ Parameters of an Automatic Voltage Regulator Type I - Resembles IEEE Type DC1
 - `Ae::Float64`: 1st ceiling coefficient, validation range: `(0, nothing)`
 - `Be::Float64`: 2nd ceiling coefficient, validation range: `(0, nothing)`
 - `V_ref::Float64`: (default: `1.0`) Reference Voltage Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) are:
 	Vf: Voltage field,
 	Vr1: Amplifier State,
 	Vr2: Stabilizing Feedback State,
 	Vm: Measured voltage
 - `n_states::Int`: (**Do not modify.**) The AVR Type I has 4 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) AVR Type I has 4 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) AVR Type I has 4 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct AVRTypeI <: AVR
@@ -71,7 +71,7 @@ mutable struct AVRTypeI <: AVR
     Be::Float64
     "Reference Voltage Set-point (pu)"
     V_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) are:
 	Vf: Voltage field,
@@ -81,7 +81,7 @@ mutable struct AVRTypeI <: AVR
     states::Vector{Symbol}
     "(**Do not modify.**) The AVR Type I has 4 states"
     n_states::Int
-    "(**Do not modify.**) AVR Type I has 4 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) AVR Type I has 4 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

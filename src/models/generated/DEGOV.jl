@@ -34,7 +34,7 @@ Parameters Woodward Diesel Governor Model. DEGOV in PowerWorld
 - `T6::Float64`: Actuator time constant, validation range: `(eps(), 100)`
 - `Td::Float64`: Engine time delay, validation range: `(eps(), 100)`
 - `P_ref::Float64`: (default: `1.0`) Reference Load Set-point (pu), validation range: `(0, nothing)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) of the DEGOV model are:
 	x_ecb1: Electric control box 1,
 	x_ecb2: Electric control box 2,
@@ -42,7 +42,7 @@ Parameters Woodward Diesel Governor Model. DEGOV in PowerWorld
 	x_a2: Actuator 2,
 	x_a3: Actuator 3,
 - `n_states::Int`: (**Do not modify.**) DEGOV has 5 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) DEGOV has 5 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) DEGOV has 5 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct DEGOV <: TurbineGov
@@ -64,7 +64,7 @@ mutable struct DEGOV <: TurbineGov
     Td::Float64
     "Reference Load Set-point (pu)"
     P_ref::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) of the DEGOV model are:
 	x_ecb1: Electric control box 1,
@@ -75,7 +75,7 @@ mutable struct DEGOV <: TurbineGov
     states::Vector{Symbol}
     "(**Do not modify.**) DEGOV has 5 states"
     n_states::Int
-    "(**Do not modify.**) DEGOV has 5 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) DEGOV has 5 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

@@ -2,7 +2,13 @@
 const SKIP_PM_VALIDATION = false
 
 const SYSTEM_KWARGS = Set((
+    :area_name_formatter,
     :branch_name_formatter,
+    :xfrm_3w_name_formatter,
+    :switched_shunt_name_formatter,
+    :transformer_control_objective_formatter,
+    :dcline_name_formatter,
+    :vscline_name_formatter,
     :bus_name_formatter,
     :config_path,
     :frequency,
@@ -27,7 +33,7 @@ const SYSTEM_KWARGS = Set((
 ))
 
 # This will be used in the future to handle serialization changes.
-const DATA_FORMAT_VERSION = "4.0.0"
+const DATA_FORMAT_VERSION = "5.0.0"
 
 mutable struct SystemMetadata <: IS.InfrastructureSystemsType
     name::Union{Nothing, String}
@@ -37,7 +43,7 @@ end
 """
 A power system
 
-`System` is the main data container in PowerSystems.jl, including basic metadata (base
+`System` is the main data container in `PowerSystems.jl`, including basic metadata (base
 power, frequency), components (network topology, loads, generators, and services), and
 time series data.
 
@@ -53,29 +59,43 @@ System(; kwargs...)
 
 # Arguments
 - `base_power::Float64`: the base power value for the system
-- `buses::Vector{ACBus}`: an array of buses
+- `buses::Vector{`[`ACBus`](@ref)`}`: an array of buses
 - `components...`: Each element (e.g., `buses`, `generators`, ...) must be an iterable
-    containing subtypes of `Component`.
+    containing subtypes of [`Component`](@ref).
+- `file::AbstractString`: Path to a Matpower, PSSE, or JSON file ending with .m, .raw, or .json
 
 # Keyword arguments
-- `ext::Dict`: Contains user-defined parameters. Should only contain standard types.
-- `frequency::Float64`: (default = 60.0) Operating frequency (Hz)
+- `name::String`: System name.
+- `description::String`: System description.
+- `frequency::Float64`: (default = 60.0) Operating frequency (Hz).
 - `runchecks::Bool`: Run available checks on input fields and when add_component! is called.
   Throws InvalidValue if an error is found.
+- `generator_mapping`: A dictionary mapping generator names to their corresponding topologies. This is used to associate generators with their respective buses when parsing from CSV.
 - `time_series_in_memory::Bool=false`: Store time series data in memory instead of HDF5.
 - `time_series_directory::Union{Nothing, String}`: Directory for the time series HDF5 file.
-    Defaults to the tmp file system
+    Defaults to the tmp file system.
+- `timeseries_metadata_file`: Path to a file containing time series metadata descriptors. This is used to add time series data to the system from files.
+- `time_series_read_only::Bool=false`: Open the time series store in read-only mode.
+    This is useful for reading time series data without modifying it.
 - `enable_compression::Bool=false`: Enable compression of time series data in HDF5.
-- `compression::CompressionSettings`: Allows customization of HDF5 compression settings.
+- `compression::`[`CompressionSettings`](@ref): Allows customization of HDF5 compression settings.
 - `config_path::String`: specify path to validation config file
 - `unit_system::String`: (Default = `"SYSTEM_BASE"`) Set the unit system for
     [per-unitization](@ref per_unit) while getting and setting data (`"SYSTEM_BASE"`,
         `"DEVICE_BASE"`, or `"NATURAL_UNITS"`)
+- `bus_name_formatter`: A function that takes a `Dict` of bus data (with keys like `"name"` and `"index"`) and returns a `String` to use as the bus name when [parsing PSSe or Matpower files](@ref pm_data).
+- `load_name_formatter`: A function that takes a `Dict` of load data (with key `"source_id"`) and returns a `String` to use as the load name when [parsing PSSe or Matpower files](@ref pm_data).
+- `loadzone_name_formatter`: A function that takes a load zone identifier (typically an `Int`) and returns a `String` to use as the load zone name when [parsing PSSe or Matpower files](@ref pm_data).
+- `gen_name_formatter`: A function that takes a `Dict` of generator data and returns a `String` to use as the generator name when [parsing PSSe or Matpower files](@ref pm_data).
+- `shunt_name_formatter`: A function that takes a `Dict` of shunt data and returns a `String` to use as the [`FixedAdmittance`](@ref) name when [parsing PSSe or Matpower files](@ref pm_data).
+- `branch_name_formatter`: A function that takes a `Dict` of branch data, a from-bus ([`ACBus`](@ref)), and a to-bus ([`ACBus`](@ref)), and returns a `String` to use as the branch name when [parsing PSSe or Matpower files](@ref pm_data).
+- `pm_data_corrections::Bool`: A function that applies the correction to the data from [`PowerModels.jl`](https://lanl-ansi.github.io/PowerModels.jl/stable/).
+- `import_all::Bool`: A boolean flag to indicate whether to import all available data when [parsing PSSe or Matpower files](@ref pm_data). The additional data will be stored in the `ext` dictionary and can be retrieved using [`get_ext`](@ref)
+- `internal::`[`InfrastructureSystems.InfrastructureSystemsInternal`](@extref): Internal structure for [`InfrastructureSystems.jl`](https://sienna-platform.github.io/InfrastructureSystems.jl/stable/). This is used only during JSON de-seralization, do not pass it when building a [`System`](@ref) manually.
 
 By default, time series data is stored in an HDF5 file in the tmp file system to prevent
-large datasets from overwhelming system memory (see [Data Storage](@ref)). 
-**If the system's time series
-data will be larger than the amount of tmp space available**, use the
+large datasets from overwhelming system memory (see [Data Storage](@ref)).
+**If the system's time series data will be larger than the amount of tmp space available**, use the
 `time_series_directory` parameter to change its location.
 You can also override the location by setting the environment
 variable `SIENNA_TIME_SERIES_DIRECTORY` to another directory.
@@ -89,6 +109,11 @@ performance by storing it in memory with `time_series_in_memory`.
 
 # Examples
 ```julia
+sys = System(100.0; name = "My Power System")
+sys = System(100.0; name = "My Power System", description = "System corresponds to scenario A")
+sys= System(path_to_my_psse_raw_file; # PSSE file bus names are not unique
+    bus_name_formatter = x -> strip(string(x["name"])) * "-" * string(x["index"]),
+)
 sys = System(100.0; enable_compression = true)
 sys = System(100.0; compression = CompressionSettings(
     enabled = true,
@@ -99,7 +124,7 @@ sys = System(100.0; compression = CompressionSettings(
 sys = System(100.0; time_series_in_memory = true)
 ```
 """
-struct System <: IS.InfrastructureSystemsType
+struct System <: IS.ComponentContainer
     data::IS.SystemData
     frequency::Float64 # [Hz]
     bus_numbers::Set{Int}
@@ -133,7 +158,7 @@ struct System <: IS.InfrastructureSystemsType
                 "unit_system kwarg ignored. The value in SystemUnitsSetting takes precedence"
             )
         end
-        bus_numbers = Set{Int}()
+        bus_numbers = Set(get_number.(IS.get_components(ACBus, data)))
         return new(
             data,
             frequency,
@@ -199,6 +224,7 @@ function System(
             number = 0,
             name = "init",
             bustype = ACBusTypes.REF,
+            available = true,
             angle = 0.0,
             magnitude = 0.0,
             voltage_limits = (min = 0.0, max = 0.0),
@@ -236,18 +262,31 @@ function System(
     )
 end
 
-"""Constructs a System from a file path ending with .m, .RAW, or .json
+function system_via_power_models(file_path::AbstractString; kwargs...)
+    pm_kwargs = Dict(k => v for (k, v) in kwargs if !in(k, SYSTEM_KWARGS))
+    sys_kwargs = Dict(k => v for (k, v) in kwargs if in(k, SYSTEM_KWARGS))
+    return System(PowerModelsData(file_path; pm_kwargs...); sys_kwargs...)
+end
 
-If the file is JSON then assign_new_uuids = true will generate new UUIDs for the system
-and all components.
+"""Constructs a System from a file path ending with .m, .raw, or .json
+
+If the file is JSON, then `assign_new_uuids = true` will generate new UUIDs for the system
+and all components. If the file is .raw, then `try_reimport = false` will skip searching for
+a `<name>_export_metadata.json` file in the same directory.
 """
-function System(file_path::AbstractString; assign_new_uuids = false, kwargs...)
-    ext = splitext(file_path)[2]
-    if lowercase(ext) in [".m", ".raw"]
-        pm_kwargs = Dict(k => v for (k, v) in kwargs if !in(k, SYSTEM_KWARGS))
-        sys_kwargs = Dict(k => v for (k, v) in kwargs if in(k, SYSTEM_KWARGS))
-        return System(PowerModelsData(file_path; pm_kwargs...); sys_kwargs...)
-    elseif lowercase(ext) == ".json"
+function System(
+    file_path::AbstractString;
+    assign_new_uuids = false,
+    try_reimport = true,
+    kwargs...,
+)
+    ext = lowercase(splitext(file_path)[2])
+    if ext == ".m"
+        return system_via_power_models(file_path; kwargs...)
+    elseif ext == ".raw"
+        try_reimport && return system_from_psse_reimport(file_path; kwargs...)
+        return system_via_power_models(file_path; kwargs...)
+    elseif ext == ".json"
         unsupported = setdiff(keys(kwargs), SYSTEM_KWARGS)
         !isempty(unsupported) && error("Unsupported kwargs = $unsupported")
         runchecks = get(kwargs, :runchecks, true)
@@ -342,13 +381,19 @@ function System(sys_file::AbstractString, dyr_file::AbstractString; kwargs...)
     else
         throw(DataFormatError("$sys_file is not a .raw file type"))
     end
-    bus_dict_gen = _parse_dyr_components(dyr_file)
-    add_dyn_injectors!(sys, bus_dict_gen)
+    add_dyn_injectors!(sys, dyr_file)
     return sys
 end
 
 """
 Construct a System from a subsystem of an existing system.
+
+# Arguments
+- `sys::`[`System`](@ref): the base system from which the subsystems are derived
+- `subsystem::String`: the name of the subsystem to extract from the original system
+
+# Keyword arguments
+- `runchecks::Bool`: (default = true) whether to run system validation checks.
 """
 function from_subsystem(sys::System, subsystem::AbstractString; runchecks = true)
     if !in(subsystem, get_subsystems(sys))
@@ -405,7 +450,7 @@ end
 Serializes a system to a JSON file and saves time series to an HDF5 file.
 
 # Arguments
-- `sys::System`: system
+- `sys::`[`System`](@ref): system
 - `filename::AbstractString`: filename to write
 
 # Keyword arguments
@@ -513,27 +558,103 @@ function set_units_setting!(
     return
 end
 
+function _set_units_base!(system::System, settings::UnitSystem)
+    to_change = (system.units_settings.unit_system != settings)
+    to_change && (system.units_settings.unit_system = settings)
+    return (to_change, settings)
+end
+
+_set_units_base!(system::System, settings::String) =
+    _set_units_base!(system::System, UNIT_SYSTEM_MAPPING[uppercase(settings)])
+
 """
 Sets the units base for the getter functions on the devices. It modifies the behavior of all getter functions
+
+# Examples
+```julia
+set_units_base_system!(sys, "NATURAL_UNITS")
+```
+```julia
+set_units_base_system!(sys, UnitSystem.SYSTEM_BASE)
+```
 """
-function set_units_base_system!(system::System, settings::String)
-    set_units_base_system!(system::System, UNIT_SYSTEM_MAPPING[uppercase(settings)])
+function set_units_base_system!(system::System, units::Union{UnitSystem, String})
+    changed, new_units = _set_units_base!(system::System, units)
+    changed && @info "Unit System changed to $new_units"
     return
 end
 
-function set_units_base_system!(system::System, settings::UnitSystem)
-    if system.units_settings.unit_system != settings
-        system.units_settings.unit_system = settings
-        @info "Unit System changed to $settings"
-    end
-    return
-end
+_get_units_base(system::System) = system.units_settings.unit_system
 
 """
 Get the system's [unit base](@ref per_unit))
 """
 function get_units_base(system::System)
-    return string(system.units_settings.unit_system)
+    return string(_get_units_base(system))
+end
+
+"""
+A "context manager" that sets the [`System`](@ref)'s [units base](@ref per_unit) to the
+given value, executes the function, then sets the units base back.
+
+# Examples
+```julia
+active_power_mw = with_units_base(sys, UnitSystem.NATURAL_UNITS) do
+    get_active_power(gen)
+end
+# now active_power_mw is in natural units no matter what units base the system is in
+```
+"""
+function with_units_base(f::Function, sys::System, units::Union{UnitSystem, String})
+    old_units = _get_units_base(sys)
+    _set_units_base!(sys, units)
+    try
+        f()
+    finally
+        _set_units_base!(sys, old_units)
+    end
+end
+
+_set_units_base!(c::Component, settings::String) =
+    _set_units_base!(c::Component, UNIT_SYSTEM_MAPPING[uppercase(settings)])
+
+function _set_units_base!(c::Component, settings::UnitSystem)
+    units_info = get_internal(c).units_info
+    old_base_value = units_info.base_value
+    set_units_setting!(
+        c,
+        SystemUnitsSettings(old_base_value, settings),
+    )
+    return
+end
+
+"""
+A "context manager" that sets the [`Component`](@ref)'s [units base](@ref per_unit) to the
+given value, executes the function, then sets the units base back.
+
+# Examples
+```julia
+active_power_mw = with_units_base(component, UnitSystem.NATURAL_UNITS) do
+    get_active_power(component)
+end
+# now active_power_mw is in natural units no matter what units base the system is in
+```
+"""
+function with_units_base(f::Function, c::Component, units::Union{UnitSystem, String})
+    internal = get_internal(c)
+    old_units_info = internal.units_info  # Save reference to restore later
+    _set_units_base!(c, units)
+    temp_units_info = internal.units_info  # The temporary object we just created
+    try
+        f()
+    finally
+        # Only restore if units_info is still temp_units_info.
+        # The user may have changed it in the function body, by e.g. removing the component
+        # and then attaching it to a different system.
+        internal.units_info === temp_units_info || error(
+            "Units info was modified during with_units_base.")
+        IS.set_units_info!(internal, old_units_info)
+    end
 end
 
 function get_units_setting(component::T) where {T <: Component}
@@ -624,7 +745,7 @@ function add_component!(
         # occurred when the original addition ran and do not apply to that scenario.
         handle_component_addition!(sys, component; kwargs...)
         # Special condition required to populate the bus numbers in the system after
-    elseif component isa ACBus
+    elseif component isa Bus
         handle_component_addition!(sys, component; kwargs...)
     end
 
@@ -673,6 +794,70 @@ function add_component!(
     return
 end
 
+"""
+Replace the dynamic injector in a static component.
+
+Safely removes the old dynamic injector from the system if no other component references it.
+If another component references the old dynamic injector, it is kept in the system and an
+info message is logged.
+
+Throws ArgumentError if the static injector is not attached to the system.
+Throws ArgumentError if the static injector does not have a dynamic injector.
+Throws ArgumentError if the new dynamic injector name does not match the static injector name.
+"""
+function replace_dynamic_injector!(
+    sys::System,
+    static_injector::StaticInjection,
+    new_dynamic_injector::DynamicInjection,
+)
+    throw_if_not_attached(static_injector, sys)
+
+    old_dynamic_injector = get_dynamic_injector(static_injector)
+    if isnothing(old_dynamic_injector)
+        throw(
+            ArgumentError(
+                "$(get_name(static_injector)) does not have a dynamic injector to replace",
+            ),
+        )
+    end
+
+    if get_name(new_dynamic_injector) != get_name(static_injector)
+        throw(
+            ArgumentError(
+                "new_dynamic_injector must have the same name as the static_injector",
+            ),
+        )
+    end
+
+    # Unlink old dynamic injector from this static component
+    set_dynamic_injector!(static_injector, nothing)
+
+    # Check if any other static injector in the system references the old dynamic injector
+    is_referenced_elsewhere = false
+    for si in get_components(StaticInjection, sys)
+        si === static_injector && continue
+        dyn = get_dynamic_injector(si)
+        if dyn === old_dynamic_injector
+            is_referenced_elsewhere = true
+            break
+        end
+    end
+
+    if is_referenced_elsewhere
+        @info "The dynamic injector $(get_name(old_dynamic_injector)) is referenced by " *
+              "another component and will not be removed from the system."
+    else
+        # Safely remove old dynamic injector from the system
+        _handle_component_removal_common!(old_dynamic_injector)
+        IS.remove_component!(sys.data, old_dynamic_injector)
+    end
+
+    # Add the new dynamic injector, linked to the static component
+    add_component!(sys, new_dynamic_injector, static_injector)
+
+    return
+end
+
 function _add_service!(
     sys::System,
     service::Service,
@@ -698,13 +883,79 @@ function _add_service!(
     end
 end
 
+function _validate_types_for_interface(sys::System, contributing_devices)
+    device_types = Set{DataType}()
+    for device in contributing_devices
+        device_type = typeof(device)
+        if !(device_type <: Branch)
+            throw(ArgumentError("contributing_devices must be of type Branch"))
+        end
+        push!(device_types, device_type)
+        throw_if_not_attached(device, sys)
+    end
+    if length(device_types) > 1 && AreaInterchange in device_types
+        throw(
+            ArgumentError(
+                "contributing_devices can't mix AreaInterchange with other Branch types",
+            ),
+        )
+    end
+    return
+end
+
+function _validate_types_for_agc(contributing_devices)
+    for device in contributing_devices
+        device_type = typeof(device)
+        if !(device_type <: Reserve)
+            throw(ArgumentError("contributing_devices of AGC must be of type Reserve"))
+        end
+    end
+    return
+end
+
+function _add_service!(
+    sys::System,
+    service::TransmissionInterface,
+    contributing_devices;
+    skip_validation = false,
+    kwargs...,
+)
+    skip_validation = _validate_or_skip!(sys, service, skip_validation)
+    _validate_types_for_interface(sys, contributing_devices)
+    set_units_setting!(service, sys.units_settings)
+    # Since this isn't atomic, order is important. Add to system before adding to devices.
+    IS.add_component!(sys.data, service; skip_validation = skip_validation, kwargs...)
+
+    for device in contributing_devices
+        add_service_internal!(device, service)
+    end
+end
+
+function _add_service!(
+    sys::System,
+    service::AGC,
+    contributing_devices;
+    skip_validation = false,
+    kwargs...,
+)
+    skip_validation = _validate_or_skip!(sys, service, skip_validation)
+    _validate_types_for_agc(contributing_devices)
+    set_units_setting!(service, sys.units_settings)
+    # Since this isn't atomic, order is important. Add to system before adding to devices.
+    IS.add_component!(sys.data, service; skip_validation = skip_validation, kwargs...)
+
+    for device in contributing_devices
+        add_service_internal!(service, device)
+    end
+end
+
 """
 Similar to [`add_component!`](@ref) but for services.
 
 # Arguments
-- `sys::System`: system
-- `service::Service`: service to add
-- `contributing_devices`: Must be an iterable of type Device
+- `sys::`[`System`](@ref): system
+- `service::`[`Service`](@ref): service to add
+- `contributing_devices`: Must be an iterable of type [`Device`](@ref)
 """
 function add_service!(sys::System, service::Service, contributing_devices; kwargs...)
     _add_service!(sys, service, contributing_devices; kwargs...)
@@ -715,9 +966,9 @@ end
 Similar to [`add_component!`](@ref) but for services.
 
 # Arguments
-- `sys::System`: system
-- `service::Service`: service to add
-- `contributing_device::Device`: Valid Device
+- `sys::`[`System`](@ref): system
+- `service::`[`Service`](@ref): service to add
+- `contributing_device::`[`Device`](@ref): Valid Device
 """
 function add_service!(sys::System, service::Service, contributing_device::Device; kwargs...)
     _add_service!(sys, service, [contributing_device]; kwargs...)
@@ -729,9 +980,9 @@ Similar to [`add_service!`](@ref) but for Service and Device already stored in t
 Performs validation checks on the device and the system
 
 # Arguments
-- `device::Device`: Device
-- `service::Service`: Service
-- `sys::System`: system
+- `device::`[`Device`](@ref): Device
+- `service::`[`Service`](@ref): Service
+- `sys::`[`System`](@ref): system
 """
 function add_service!(device::Device, service::Service, sys::System)
     throw_if_not_attached(service, sys)
@@ -744,8 +995,8 @@ end
 Similar to [`add_component!`](@ref) but for ConstantReserveGroup.
 
 # Arguments
-- `sys::System`: system
-- `service::ConstantReserveGroup`: service to add
+- `sys::`[`System`](@ref): system
+- `service::`[`ConstantReserveGroup`](@ref): service to add
 """
 function add_service!(
     sys::System,
@@ -781,9 +1032,9 @@ end
 Similar to [`add_component!`](@ref) but for ConstantReserveGroup.
 
 # Arguments
-- `sys::System`: system
-- `service::ConstantReserveGroup`: service to add
-- `contributing_services`: contributing services to the group
+- `sys::`[`System`](@ref): system
+- `service::`[`ConstantReserveGroup`](@ref): service to add
+- `contributing_services`: contributing [`Service`](@ref) instances to the group
 """
 function add_service!(
     sys::System,
@@ -818,10 +1069,10 @@ open_time_series_store!(sys, "r+") do
     end
 end
 ```
-You can also use this function to make reads faster. Change the mode from `"r+"` to `"r"` to open
-the file read-only.
+You can also use this function to make reads faster.
+Change the mode from `"r+"` to `"r"` to open the file read-only.
 
-See also: [`bulk_add_time_series!`](@ref)
+See also: [`begin_time_series_update`](@ref)
 """
 function open_time_series_store!(
     func::Function,
@@ -834,12 +1085,31 @@ function open_time_series_store!(
 end
 
 """
+Begin an update of time series. Use this function when adding many time series arrays
+in order to improve performance.
+
+If an error occurs during the update, changes will be reverted.
+
+Using this function to remove time series is currently not supported.
+
+# Examples
+```julia
+begin_time_series_update(sys) do
+    add_time_series!(sys, component1, time_series1)
+    add_time_series!(sys, component2, time_series2)
+end
+```
+"""
+begin_time_series_update(func::Function, sys::System) =
+    IS.begin_time_series_update(func, sys.data.time_series_manager)
+
+"""
 Add time series data from a metadata file or metadata descriptors.
 
 # Arguments
-- `sys::System`: system
+- `sys::`[`System`](@ref): system
 - `metadata_file::AbstractString`: metadata file for timeseries
-  that includes an array of IS.TimeSeriesFileMetadata instances or a vector.
+  that includes an array of [`InfrastructureSystems.TimeSeriesFileMetadata`](@extref) instances or a vector.
 - `resolution::DateTime.Period=nothing`: skip time series that don't match this resolution.
 """
 function add_time_series!(sys::System, metadata_file::AbstractString; resolution = nothing)
@@ -855,8 +1125,8 @@ end
 Add time series data from a metadata file or metadata descriptors.
 
 # Arguments
-- `sys::System`: system
-- `timeseries_metadata::Vector{IS.TimeSeriesFileMetadata}`: metadata for timeseries
+- `sys::`[`System`](@ref): system
+- `timeseries_metadata::Vector{`[`InfrastructureSystems.TimeSeriesFileMetadata`](@extref)`}`: metadata for timeseries
 - `resolution::DateTime.Period=nothing`: skip time series that don't match this resolution.
 """
 function add_time_series!(
@@ -952,6 +1222,11 @@ function remove_components!(::Type{T}, sys::System) where {T <: Component}
     return remove_components!(sys, T)
 end
 
+"""
+Remove all components of type `T` from the system.
+
+Throws `ArgumentError` if the type is not stored.
+"""
 function remove_components!(sys::System, ::Type{T}) where {T <: Component}
     components = IS.remove_components!(T, sys.data)
     for component in components
@@ -960,6 +1235,9 @@ function remove_components!(sys::System, ::Type{T}) where {T <: Component}
     return components
 end
 
+"""
+Remove all components of type `T` that match `filter_func` from the system.
+"""
 function remove_components!(
     filter_func::Function,
     sys::System,
@@ -1052,8 +1330,8 @@ end
 """
 Check to see if the component of type T exists.
 """
-function has_component(sys::System, T::Type{<:Component})
-    return IS.has_component(sys.data, T)
+function has_components(sys::System, T::Type{<:Component})
+    return IS.has_components(sys.data.components, T)
 end
 
 """
@@ -1075,29 +1353,36 @@ See [`get_components_by_name`](@ref) for abstract types with non-unique names ac
 Throws ArgumentError if T is not a concrete type and there is more than one component with
     requested name
 """
-function get_component(::Type{T}, sys::System, name::AbstractString) where {T <: Component}
+function IS.get_component(
+    ::Type{T},
+    sys::System,
+    name::AbstractString,
+) where {T <: Component}
     return IS.get_component(T, sys.data, name)
 end
 
 """
-Returns an iterator of components. T can be concrete or abstract.
+Return an iterator of components of a given `Type` from a [`System`](@ref).
+
+`T` can be a concrete or abstract [`Component`](@ref) type from the [Type Tree](@ref).
 Call collect on the result if an array is desired.
 
 # Examples
 ```julia
-iter = PowerSystems.get_components(ThermalStandard, sys)
-iter = PowerSystems.get_components(Generator, sys)
-iter = PowerSystems.get_components(x -> PowerSystems.get_available(x), Generator, sys)
-thermal_gens = get_components(ThermalStandard, sys) do gen
-    get_available(gen)
-end
-generators = collect(PowerSystems.get_components(Generator, sys))
-
+iter = get_components(ThermalStandard, sys)
+iter = get_components(Generator, sys)
+generators = collect(get_components(Generator, sys))
 ```
 
-See also: [`iterate_components`](@ref)
+See also: [`iterate_components`](@ref), [`get_components` with a filter](@ref get_components(
+    filter_func::Function,
+    ::Type{T},
+    sys::System;
+    subsystem_name = nothing,
+) where {T <: Component}),
+[`get_available_components`](@ref), [`get_buses`](@ref)
 """
-function get_components(
+function IS.get_components(
     ::Type{T},
     sys::System;
     subsystem_name = nothing,
@@ -1105,7 +1390,7 @@ function get_components(
     return IS.get_components(T, sys.data; subsystem_name = subsystem_name)
 end
 
-function get_components(
+function IS.get_components(
     filter_func::Function,
     ::Type{T},
     sys::System;
@@ -1117,15 +1402,15 @@ end
 """
 Return a vector of components that are attached to the supplemental attribute.
 """
-function get_components(sys::System, attribute::SupplementalAttribute)
+function IS.get_components(sys::System, attribute::SupplementalAttribute)
     return IS.get_components(sys.data, attribute)
 end
 
 """
 Get the component by UUID.
 """
-get_component(sys::System, uuid::Base.UUID) = IS.get_component(sys.data, uuid)
-get_component(sys::System, uuid::String) = IS.get_component(sys.data, Base.UUID(uuid))
+IS.get_component(sys::System, uuid::Base.UUID) = IS.get_component(sys.data, uuid)
+IS.get_component(sys::System, uuid::String) = IS.get_component(sys.data, Base.UUID(uuid))
 
 """
 Change the UUID of a component.
@@ -1161,13 +1446,6 @@ function get_components_by_name(
 end
 
 """
-Gets components availability. Requires type T to have the method get_available implemented.
-"""
-function get_available_components(::Type{T}, sys::System) where {T <: Component}
-    return get_components(get_available, T, sys)
-end
-
-"""
 Return true if the component is attached to the system.
 """
 function is_attached(component::T, sys::System) where {T <: Component}
@@ -1190,9 +1468,23 @@ Return a vector of devices contributing to the service.
 """
 function get_contributing_devices(sys::System, service::T) where {T <: Service}
     throw_if_not_attached(service, sys)
-    return [x for x in get_components(Device, sys) if has_service(x, service)]
+    return [
+        x for x in get_components(supports_services, Device, sys) if has_service(x, service)
+    ]
 end
 
+"""
+Return a vector of devices contributing to the service.
+"""
+function get_contributing_devices(sys::System, service::TransmissionInterface)
+    throw_if_not_attached(service, sys)
+    return [x for x in get_components(Branch, sys) if has_service(x, service)]
+end
+
+"""
+Container associating a [`Service`](@ref) with the [`Device`](@ref) components that
+contribute to it.
+"""
 struct ServiceContributingDevices
     service::Service
     contributing_devices::Vector{Device}
@@ -1202,6 +1494,15 @@ const ServiceContributingDevicesKey = NamedTuple{(:type, :name), Tuple{DataType,
 const ServiceContributingDevicesMapping =
     Dict{ServiceContributingDevicesKey, ServiceContributingDevices}
 
+struct AGCContributingReserves
+    agc::AGC
+    contributing_reserves::Vector{Reserve}
+end
+
+const AGCContributingReservesKey = NamedTuple{(:type, :name), Tuple{DataType, String}}
+const AGCContributingReservesMapping =
+    Dict{AGCContributingReservesKey, AGCContributingReserves}
+
 """
 Returns a ServiceContributingDevices object.
 """
@@ -1209,14 +1510,47 @@ function _get_contributing_devices(sys::System, service::T) where {T <: Service}
     uuid = IS.get_uuid(service)
     devices = ServiceContributingDevices(service, Vector{Device}())
     for device in get_components(Device, sys)
-        for _service in get_services(device)
-            if IS.get_uuid(_service) == uuid
-                push!(devices.contributing_devices, device)
-                break
+        if supports_services(device)
+            for _service in get_services(device)
+                if IS.get_uuid(_service) == uuid
+                    push!(devices.contributing_devices, device)
+                    break
+                end
             end
         end
     end
     return devices
+end
+
+"""
+Returns a ServiceContributingDevices object.
+"""
+function _get_contributing_devices(sys::System, service::TransmissionInterface)
+    uuid = IS.get_uuid(service)
+    devices = ServiceContributingDevices(service, Vector{Device}())
+    for device in get_components(Branch, sys)
+        if supports_services(device)
+            for _service in get_services(device)
+                if IS.get_uuid(_service) == uuid
+                    push!(devices.contributing_devices, device)
+                    break
+                end
+            end
+        end
+    end
+    return devices
+end
+
+"""
+Return an instance of AGCContributingReservesMapping.
+"""
+function get_contributing_reserve_mapping(sys::System)
+    agcs = AGCContributingReservesMapping()
+    for agc in get_components(AGC, sys)
+        key = AGCContributingReservesKey((typeof(agc), get_name(agc)))
+        agcs[key] = AGCContributingReserves(agc, get_reserves(agc))
+    end
+    return agcs
 end
 
 """
@@ -1233,7 +1567,104 @@ function get_contributing_device_mapping(sys::System)
 end
 
 """
-Return a vector of components with buses in the AggregationTopology.
+Return a vector of connected head reservoirs to the turbine. Reservoirs that have the turbine in their downstream_turbines field are head reservoirs of such turbine.
+"""
+function get_connected_head_reservoirs(sys::System, turbine::T) where {T <: HydroUnit}
+    throw_if_not_attached(turbine, sys)
+    return [
+        x for x in get_components(HydroReservoir, sys) if has_downstream_turbine(x, turbine)
+    ]
+end
+
+"""
+Return a vector of connected tail reservoirs to the turbine. Reservoirs that have the turbine in their upstream_turbines field are tail reservoirs of such turbine.
+"""
+function get_connected_tail_reservoirs(sys::System, turbine::T) where {T <: HydroUnit}
+    throw_if_not_attached(turbine, sys)
+    return [
+        x for x in get_components(HydroReservoir, sys) if has_upstream_turbine(x, turbine)
+    ]
+end
+
+"""
+Container associating a hydro turbine with its connected [`Device`](@ref) components
+(e.g., [`HydroReservoir`](@ref) units).
+"""
+struct TurbineConnectedDevices
+    turbine::HydroUnit
+    connected_devices::Vector{Device}
+end
+
+const TurbineConnectedDevicesKey = NamedTuple{(:type, :name), Tuple{DataType, String}}
+const TurbineConnectedDevicesMapping =
+    Dict{TurbineConnectedDevicesKey, TurbineConnectedDevices}
+
+"""
+Returns a TurbineConnectedDevices object.
+"""
+function _get_connected_head_devices(sys::System, turbine::T) where {T <: HydroUnit}
+    uuid = IS.get_uuid(turbine)
+    devices = TurbineConnectedDevices(turbine, Vector{Device}())
+    for device in get_components(HydroReservoir, sys)
+        # Only add reservoirs that have the turbine in their downstream_turbines field
+        # That is, those reservoirs are a head reservoir to that turbine
+        for _turbine in get_downstream_turbines(device)
+            if IS.get_uuid(_turbine) == uuid
+                push!(devices.connected_devices, device)
+                break
+            end
+        end
+    end
+    return devices
+end
+
+"""
+Returns a TurbineConnectedDevices object.
+"""
+function _get_connected_tail_devices(sys::System, turbine::T) where {T <: HydroUnit}
+    uuid = IS.get_uuid(turbine)
+    devices = TurbineConnectedDevices(turbine, Vector{Device}())
+    for device in get_components(HydroReservoir, sys)
+        # Only add reservoirs that have the turbine in their upstream_turbines field
+        # That is, those reservoirs are a tail reservoir to that turbine
+        for _turbine in get_upstream_turbines(device)
+            if IS.get_uuid(_turbine) == uuid
+                push!(devices.connected_devices, device)
+                break
+            end
+        end
+    end
+    return devices
+end
+
+"""
+Return an instance of TurbineConnectedDevicesMapping.
+"""
+function get_turbine_head_reservoirs_mapping(sys::System)
+    turbine_mapping = TurbineConnectedDevicesMapping()
+    for turbine in get_components(HydroUnit, sys)
+        key = TurbineConnectedDevicesKey((typeof(HydroUnit), get_name(turbine)))
+        turbine_mapping[key] = _get_connected_head_devices(sys, turbine)
+    end
+
+    return turbine_mapping
+end
+
+"""
+Return an instance of TurbineConnectedDevicesMapping.
+"""
+function get_turbine_tail_reservoirs_mapping(sys::System)
+    turbine_mapping = TurbineConnectedDevicesMapping()
+    for turbine in get_components(HydroUnit, sys)
+        key = TurbineConnectedDevicesKey((typeof(HydroUnit), get_name(turbine)))
+        turbine_mapping[key] = _get_connected_tail_devices(sys, turbine)
+    end
+
+    return turbine_mapping
+end
+
+"""
+Return a vector of components with buses in the [`AggregationTopology`](@ref).
 """
 function get_components_in_aggregation_topology(
     ::Type{T},
@@ -1253,7 +1684,7 @@ function get_components_in_aggregation_topology(
     return components
 end
 
-"Return whether the given component's bus is in the AggregationTopology."
+"Return whether the given component's bus is in the [`AggregationTopology`](@ref)"
 function is_component_in_aggregation_topology(
     comp::Component,
     aggregator::T,
@@ -1263,7 +1694,7 @@ function is_component_in_aggregation_topology(
 end
 
 """
-Return a mapping of AggregationTopology name to vector of buses within it.
+Return a mapping of [`AggregationTopology`](@ref) name to vector of [`ACBus`](@ref)es within it.
 """
 function get_aggregation_topology_mapping(
     ::Type{T},
@@ -1286,7 +1717,13 @@ function get_aggregation_topology_mapping(
 end
 
 """
-Return a vector of buses contained within the AggregationTopology.
+Return a vector of buses contained within an [`AggregationTopology`](@ref).
+
+# Examples
+```julia
+area = get_component(Area, system, "my_area"); # Get an Area named my_area
+area_buses = get_buses(system, area)
+```
 """
 function get_buses(sys::System, aggregator::AggregationTopology)
     return _get_buses(sys.data, aggregator)
@@ -1297,7 +1734,7 @@ function _get_buses(data::IS.SystemData, aggregator::T) where {T <: AggregationT
     buses = Vector{ACBus}()
     for bus in IS.get_components(ACBus, data)
         _aggregator = accessor_func(bus)
-        if IS.get_uuid(_aggregator) == IS.get_uuid(aggregator)
+        if !isnothing(_aggregator) && IS.get_uuid(_aggregator) == IS.get_uuid(aggregator)
             push!(buses, bus)
         end
     end
@@ -1306,10 +1743,35 @@ function _get_buses(data::IS.SystemData, aggregator::T) where {T <: AggregationT
 end
 
 """
-Add time series data to a component.
+Add time series data to a component. Assign optional features to differentiate time series
+of the same type with the same name but with different data.
+
+Returns a key that can later be used to retrieve the time series data.
 
 Throws ArgumentError if the component is not stored in the system.
 
+# Examples
+```julia
+ts1 = Deterministic(
+    name = "max_active_power",
+    data = deterministic_data,
+    resolution = Dates.Hour(1),
+)
+ts2 = SingleTimeSeries(
+    name = "max_active_power",
+    data = time_array_1,
+)
+ts3 = SingleTimeSeries(
+    name = "max_active_power",
+    data = time_array_2,
+)
+key1 = add_time_series!(system, component, ts1)
+key2 = add_time_series!(system, component, ts2, scenario = "high")
+key3 = add_time_series!(system, component, ts3, scenario = "low")
+ts1_b = get_time_series(component, key1)
+ts2_b = get_time_series(component, key2)
+ts3_b = get_time_series(component, key3)
+```
 """
 function add_time_series!(
     sys::System,
@@ -1321,17 +1783,9 @@ function add_time_series!(
 end
 
 """
-Add many time series in bulk
+Add time series in bulk.
 
-This method is advantageous when adding thousands of time
-series arrays because of the overhead in writing the time series to the underlying storage.
-
-# Arguments
-- `sys::System`: system
-- `associations`: Iterable of [`TimeSeriesAssociation`](@ref) instances. Using a Vector is not
-  recommended. Pass a Generator or Iterator to avoid loading all time series data into
-  system memory at once.
-- `batch_size::Int`: (Default = 100) Number of time series to add per batch.
+Prefer use of [`begin_time_series_update`](@ref).
 
 # Examples
 ```julia
@@ -1350,9 +1804,6 @@ associations = (
 )
 bulk_add_time_series!(sys, associations)
 ```
-
-See also: [`open_time_series_store!`](@ref) to minimize HDF5 file handle overhead if you
-must add time series arrays one at a time
 """
 function bulk_add_time_series!(
     sys::System,
@@ -1382,11 +1833,11 @@ end
 Return a vector of time series data from a metadata file.
 
 # Arguments
-- `data::SystemData`: system
+- `sys::`[`System`](@ref): system
 - `metadata_file::AbstractString`: path to metadata file
 - `resolution::{Nothing, Dates.Period}`: skip data that doesn't match this resolution
 
-See InfrastructureSystems.TimeSeriesFileMetadata for description of what the file
+See [`InfrastructureSystems.TimeSeriesFileMetadata`](@extref) for description of what the file
 should contain.
 """
 function make_time_series(sys::System, metadata_file::AbstractString; resolution = nothing)
@@ -1402,8 +1853,8 @@ end
 Return a vector of time series data from a vector of TimeSeriesFileMetadata values.
 
 # Arguments
-- `data::SystemData`: system
-- `timeseries_metadata::Vector{TimeSeriesFileMetadata}`: metadata values
+- `sys::`[`System`](@ref): system
+- `timeseries_metadata::Vector{`[`InfrastructureSystems.TimeSeriesFileMetadata`](@extref)`}`: metadata values
 - `resolution::{Nothing, Dates.Period}`: skip data that doesn't match this resolution
 """
 function make_time_series(
@@ -1421,29 +1872,39 @@ Return the compression settings used for system data such as time series arrays.
 get_compression_settings(sys::System) = IS.get_compression_settings(sys.data)
 
 """
-Return the initial times for all forecasts.
+Return the initial times for all forecasts. Use `resolution` and/or `interval` keyword
+arguments to filter when multiple forecast groups exist.
 """
-get_forecast_initial_times(sys::System) = IS.get_forecast_initial_times(sys.data)
+get_forecast_initial_times(sys::System; kwargs...) =
+    IS.get_forecast_initial_times(sys.data; kwargs...)
 
 """
-Return the window count for all forecasts.
+Return the window count for all forecasts. Use `resolution` and/or `interval` keyword
+arguments to filter when multiple forecast groups exist.
 """
-get_forecast_window_count(sys::System) = IS.get_forecast_window_count(sys.data)
+get_forecast_window_count(sys::System; kwargs...) =
+    IS.get_forecast_window_count(sys.data; kwargs...)
 
 """
-Return the horizon for all forecasts.
+Return the horizon for all forecasts. Use `resolution` and/or `interval` keyword
+arguments to filter when multiple forecast groups exist.
 """
-get_forecast_horizon(sys::System) = IS.get_forecast_horizon(sys.data)
+get_forecast_horizon(sys::System; kwargs...) =
+    IS.get_forecast_horizon(sys.data; kwargs...)
 
 """
-Return the initial_timestamp for all forecasts.
+Return the initial timestamp for all forecasts. Use `resolution` and/or `interval` keyword
+arguments to filter when multiple forecast groups exist.
 """
-get_forecast_initial_timestamp(sys::System) = IS.get_forecast_initial_timestamp(sys.data)
+get_forecast_initial_timestamp(sys::System; kwargs...) =
+    IS.get_forecast_initial_timestamp(sys.data; kwargs...)
 
 """
-Return the interval for all forecasts.
+Return the forecast interval. Use `resolution` and/or `interval` keyword arguments to
+select which forecast group to query when multiple exist.
 """
-get_forecast_interval(sys::System) = IS.get_forecast_interval(sys.data)
+get_forecast_interval(sys::System; kwargs...) =
+    IS.get_forecast_interval(sys.data; kwargs...)
 
 """
 Return a sorted Vector of distinct resolutions for all time series of the given type
@@ -1455,7 +1916,7 @@ get_time_series_resolutions(
 ) = IS.get_time_series_resolutions(sys.data; time_series_type = time_series_type)
 
 """
-Return an iterator of time series in order of initial time.
+Return an iterator of time series attached to components in the system.
 
 Note that passing a filter function can be much slower than the other filtering parameters
 because it reads time series data from media.
@@ -1463,10 +1924,12 @@ because it reads time series data from media.
 Call `collect` on the result to get an array.
 
 # Arguments
-- `data::SystemData`: system
+- `sys::`[`System`](@ref): system
 - `filter_func = nothing`: Only return time series for which this returns true.
-- `type = nothing`: Only return time series with this type.
+- `type = nothing`: Only return time series with this [`TimeSeriesData`](@ref) type.
 - `name = nothing`: Only return time series matching this value.
+- `resolution = nothing`: Only return time series matching this resolution.
+- `interval = nothing`: Only return time series matching this interval.
 
 # Examples
 ```julia
@@ -1482,8 +1945,24 @@ function IS.get_time_series_multiple(
     filter_func = nothing;
     type = nothing,
     name = nothing,
+    resolution = nothing,
+    interval = nothing,
 )
-    return get_time_series_multiple(sys.data, filter_func; type = type, name = name)
+    Channel{TimeSeriesData}() do channel
+        for component in
+            IS.iterate_components_with_time_series(sys.data; time_series_type = type)
+            for time_series in get_time_series_multiple(
+                component,
+                filter_func;
+                type = type,
+                name = name,
+                resolution = resolution,
+                interval = interval,
+            )
+                put!(channel, time_series)
+            end
+        end
+    end
 end
 
 """
@@ -1499,15 +1978,30 @@ function clear_time_series!(sys::System)
 end
 
 """
-Remove the time series data for a component and time series type.
+Remove the time series data for a component or supplemental attribute and time series type.
+
+Use `resolution`, `interval`, and `features` keyword arguments to disambiguate when multiple
+time series of the same type and name exist with different resolutions, intervals, or
+user-defined feature tags.
 """
 function remove_time_series!(
     sys::System,
     ::Type{T},
-    component::Component,
-    name::String,
+    owner::Union{Component, SupplementalAttribute},
+    name::String;
+    resolution::Union{Nothing, Dates.Period} = nothing,
+    interval::Union{Nothing, Dates.Period} = nothing,
+    features...,
 ) where {T <: TimeSeriesData}
-    return IS.remove_time_series!(sys.data, T, component, name)
+    return IS.remove_time_series!(
+        sys.data,
+        T,
+        owner,
+        name;
+        resolution = resolution,
+        interval = interval,
+        features...,
+    )
 end
 
 """
@@ -1521,8 +2015,13 @@ most time series instances then consider using `clear_time_series!`. It
 will delete the HDF5 file and create a new one. PowerSystems has plans to
 automate this type of workflow.
 """
-function remove_time_series!(sys::System, ::Type{T}) where {T <: TimeSeriesData}
-    return IS.remove_time_series!(sys.data, T)
+function remove_time_series!(
+    sys::System,
+    ::Type{T};
+    resolution::Union{Nothing, Dates.Period} = nothing,
+    interval::Union{Nothing, Dates.Period} = nothing,
+) where {T <: TimeSeriesData}
+    return IS.remove_time_series!(sys.data, T; resolution = resolution, interval = interval)
 end
 
 """
@@ -1534,24 +2033,34 @@ when actual forecasts are unavailable, without unnecessarily duplicating data.
 
 If all `SingleTimeSeries` instances cannot be transformed then none will be.
 
-Any existing `DeterministicSingleTimeSeries` forecasts will be deleted even if the inputs are
-invalid.
+By default, any existing `DeterministicSingleTimeSeries` forecasts will be deleted before the
+transform (`delete_existing = true`). Set `delete_existing = false` to preserve existing
+`DeterministicSingleTimeSeries`; entries with matching name, resolution, features, horizon,
+and interval are skipped, allowing multiple calls with different resolutions to coexist.
 
 # Arguments
-- `sys::System`: System containing the components.
+- `sys::`[`System`](@ref): System containing the components.
 - `horizon::Dates.Period`: desired [horizon](@ref H) of each forecast [window](@ref W)
 - `interval::Dates.Period`: desired [interval](@ref I) between forecast [windows](@ref W)
+- `resolution::Union{Nothing, Dates.Period} = nothing`: If set, only transform time series
+   with this resolution.
+- `delete_existing::Bool = true`: If `true`, delete all existing
+   [`DeterministicSingleTimeSeries`](@ref) before transforming.
 """
 function transform_single_time_series!(
     sys::System,
     horizon::Dates.Period,
-    interval::Dates.Period,
+    interval::Dates.Period;
+    resolution::Union{Nothing, Dates.Period} = nothing,
+    delete_existing::Bool = true,
 )
     IS.transform_single_time_series!(
         sys.data,
         IS.DeterministicSingleTimeSeries,
         horizon,
-        interval,
+        interval;
+        resolution = resolution,
+        delete_existing = delete_existing,
     )
     return
 end
@@ -1568,6 +2077,45 @@ function add_supplemental_attribute!(
     return IS.add_supplemental_attribute!(sys.data, component, attribute)
 end
 
+function add_supplemental_attribute!(
+    sys::System,
+    component::Component,
+    outage::Outage,
+)
+    if get_runchecks(sys)
+        for uuid in get_monitored_components(outage)
+            comp = IS.get_component(sys, uuid)  # throws ArgumentError on miss
+            if !(comp isa Device)
+                throw(
+                    ArgumentError(
+                        "monitored_components on $(typeof(outage)) references UUID " *
+                        "$(uuid), which resolves to $(typeof(comp)); only " *
+                        "Device subtypes are allowed",
+                    ),
+                )
+            end
+        end
+    end
+    return IS.add_supplemental_attribute!(sys.data, component, outage)
+end
+
+"""
+Begin an update of supplemental attributes. Use this function when adding
+or removing many supplemental attributes in order to improve performance.
+
+If an error occurs during the update, changes will be reverted.
+
+# Examples
+```julia
+begin_supplemental_attributes_update(sys) do
+    add_supplemental_attribute!(sys, component1, attribute1)
+    add_supplemental_attribute!(sys, component2, attribute2)
+end
+```
+"""
+begin_supplemental_attributes_update(func::Function, sys::System) =
+    IS.begin_supplemental_attributes_update(func, sys.data.supplemental_attribute_manager)
+
 """
 Remove the supplemental attribute from the component. The attribute will be removed from the
 system if it is not attached to any other component.
@@ -1581,20 +2129,13 @@ function remove_supplemental_attribute!(
 end
 
 """
-Remove the supplemental attribute from the system and all attached components.
-"""
-function remove_supplemental_attribute!(sys::System, attribute::IS.SupplementalAttribute)
-    return IS.remove_supplemental_attribute!(sys.data, attribute)
-end
-
-"""
 Remove all supplemental attributes with the given type from the system.
 """
 function remove_supplemental_attributes!(
     ::Type{T},
     sys::System,
 ) where {T <: IS.SupplementalAttribute}
-    return IS.remove_supplemental_attributes!(T, sys.data)
+    return IS.remove_supplemental_attributes!(sys.data, T)
 end
 
 """
@@ -1630,6 +2171,41 @@ function get_supplemental_attributes(
 end
 
 """
+    get_associated_supplemental_attributes(sys::System, ::Type{T}; attribute_type = nothing)
+
+Return the supplemental attributes associated with components of type `T`.
+
+# Arguments
+- `sys::`[`System`](@ref): System containing the components.
+- `::Type{T}`: [`Component`](@ref) type to filter by.
+- `attribute_type::Union{Nothing, Type{<:SupplementalAttribute}}`: (default: `nothing`)
+    Optionally restrict the result to a single supplemental attribute type.
+
+# Examples
+```julia
+attrs = get_associated_supplemental_attributes(
+    sys,
+    ThermalStandard;
+    attribute_type = GeometricDistributionForcedOutage,
+)
+for attr in attrs
+    @show summary(attr)
+end
+```
+"""
+function get_associated_supplemental_attributes(
+    sys::System,
+    ::Type{T};
+    attribute_type::Union{Nothing, Type{<:IS.SupplementalAttribute}} = nothing,
+) where {T <: IS.InfrastructureSystemsComponent}
+    return IS.get_associated_supplemental_attributes(
+        sys.data,
+        T;
+        attribute_type = attribute_type,
+    )
+end
+
+"""
 Return the supplemental attribute with the given uuid.
 
 Throws ArgumentError if the attribute is not stored.
@@ -1652,6 +2228,61 @@ See also: [`get_supplemental_attributes`](@ref)
 """
 function iterate_supplemental_attributes(sys::System)
     return IS.iterate_supplemental_attributes(sys.data)
+end
+
+"""
+Return a vector of NamedTuples with pairs of components and supplemental attributes that
+are associated with each other. Limit by `components` and `attributes` if provided.
+
+The return type is `NamedTuple{(:component, :supplemental_attribute), Tuple{T, U}}[]`
+where `T` is the component type and `U` is the supplemental attribute type.
+
+# Arguments
+- `sys::`[`System`](@ref): System containing the components and attributes.
+- `::Type{T}`: Type of the [`Component`](@ref) to filter by. Can be concrete or abstract.
+- `::Type{U}`: Type of the [`SupplementalAttribute`](@ref) to filter by. Can be concrete or abstract.
+- `components`: Optional iterable. If set, filter pairs where the component is in this
+  iterable.
+- `attributes`: Optional iterable. If set, filter pairs where the supplemental attribute is
+  in this iterable.
+
+# Examples
+```julia
+gen_attr_pairs = get_component_supplemental_attribute_pairs(
+    GeometricDistributionForcedOutage,
+    ThermalStandard,
+    sys,
+)
+for (gen, attr) in gen_attr_pairs
+    @show summary(gen) summary(attr)
+end
+
+my_generators = [gen1, gen2, gen3]
+gen_attr_pairs_limited = get_component_supplemental_attribute_pairs(
+    GeometricDistributionForcedOutage,
+    ThermalStandard,
+    sys,
+    components = my_generators,
+)
+for (gen, attr) in gen_attr_pairs_limited
+    @show summary(gen) summary(attr)
+end
+```
+"""
+function get_component_supplemental_attribute_pairs(
+    ::Type{T},
+    ::Type{U},
+    sys::System;
+    components = nothing,
+    attributes = nothing,
+) where {T <: Component, U <: SupplementalAttribute}
+    return IS.get_component_supplemental_attribute_pairs(
+        T,
+        U,
+        sys.data;
+        components = components,
+        attributes = attributes,
+    )
 end
 
 """
@@ -1690,10 +2321,11 @@ Check system consistency and validity.
 function check(sys::System)
     buses = get_components(ACBus, sys)
     slack_bus_check(buses)
-    buscheck(buses)
+    buscheck(sys)
     critical_components_check(sys)
     adequacy_check(sys)
     check_subsystems(sys)
+    check_parallel_branch_type_consistency(sys)
     return
 end
 
@@ -1783,24 +2415,35 @@ range or if the custom validate method for the type fails its check.
 """
 function check_component(sys::System, component::Component)
     if !validate_component_with_system(component, sys)
-        throw(IS.InvalidValue("Invalid value for $component"))
+        throw(IS.InvalidValue("Invalid value for $(summary(component))"))
     end
     IS.check_component(sys.data, component)
     return
 end
 
-function check_sil_values(sys::System)
+"""
+Check that all AC transmission [`Line`](@ref) and [`MonitoredLine`](@ref) components
+have valid rate values relative to the system base power.
+
+Returns `true` if all values are valid, `false` otherwise.
+"""
+function check_ac_transmission_rate_values(sys::System)
     is_valid = true
     base_power = get_base_power(sys)
     for line in
         Iterators.flatten((get_components(Line, sys), get_components(MonitoredLine, sys)))
-        if !check_sil_values(line, base_power)
+        if !check_rating_values(line, base_power)
             is_valid = false
         end
     end
     return is_valid
 end
 
+"""
+Serialize a [System](@ref) instance. Returns a `Dict{String, Any}`
+of the form `Dict("data_format_version" => "1.0", "field1" => serialize(sys.field1), ...)`,
+which can then be written to a JSON3 file.
+"""
 function IS.serialize(sys::T) where {T <: System}
     data = Dict{String, Any}()
     data["data_format_version"] = DATA_FORMAT_VERSION
@@ -1816,6 +2459,9 @@ function IS.serialize(sys::T) where {T <: System}
     return data
 end
 
+"""
+Deserialize a [System](@ref) instance from a JSON3 file; the reverse of [`IS.serialize`](@ref).
+"""
 function IS.deserialize(
     ::Type{System},
     filename::AbstractString;
@@ -1954,6 +2600,8 @@ function deserialize_components!(sys::System, raw)
             if !isnothing(include_types) && !is_matching_type(type, include_types)
                 continue
             end
+            components =
+                _handle_hydro_reservoirs_deserialization_special_cases(components, type)
             for component in components
                 handle_deserialization_special_cases!(component, type)
                 comp = deserialize(type, component, component_cache)
@@ -1968,17 +2616,24 @@ function deserialize_components!(sys::System, raw)
     end
 
     # Run in order based on type composition.
-    # Bus and AGC instances can have areas and LoadZones.
+    # Bus instances can have areas and LoadZones.
+    # AGC instances can have areas and contributing reserves
     # Most components have buses.
     # Static injection devices can contain dynamic injection devices.
     # StaticInjectionSubsystem instances have StaticInjection subcomponents.
     deserialize_and_add!(; include_types = [Area, LoadZone])
+    deserialize_and_add!(; include_types = [AbstractReserve])
     deserialize_and_add!(; include_types = [AGC])
     deserialize_and_add!(; include_types = [Bus])
     deserialize_and_add!(;
         include_types = [Arc, Service],
         skip_types = [ConstantReserveGroup],
     )
+    deserialize_and_add!(;
+        include_types = [HydroTurbine, HydroPumpTurbine],
+        skip_types = [ConstantReserveGroup, HydroReservoir],
+    )
+    deserialize_and_add!(; include_types = [HydroReservoir])
     deserialize_and_add!(; include_types = [Branch])
     deserialize_and_add!(; include_types = [DynamicBranch])
     deserialize_and_add!(; include_types = [ConstantReserveGroup, DynamicInjection])
@@ -1999,7 +2654,7 @@ Allow types to implement handling of special cases during deserialization.
 
 # Arguments
 - `component::Dict`: The component serialized as a dictionary.
-- `::Type`: The type of the component.
+- `::Type`: The type of the [`Component`](@ref).
 """
 handle_deserialization_special_cases!(component::Dict, ::Type{<:Component}) = nothing
 
@@ -2016,15 +2671,98 @@ handle_deserialization_special_cases!(component::Dict, ::Type{<:Component}) = no
 #    return
 #end
 
+# This function does an iterative union find to handle the ordering of the reservoir chains
+function _handle_hydro_reservoirs_deserialization_special_cases(
+    components::Vector{Dict},
+    ::Type{HydroReservoir},
+)
+
+    # Build a mapping from UUID to component for quick lookup
+    uuid_to_component = Dict{String, Dict}()
+    for component in components
+        uuid_str = string(component["internal"]["uuid"])
+        uuid_to_component[uuid_str] = component
+    end
+
+    # Build parent mapping for union-find (each reservoir points to its upstream reservoir)
+    parent = Dict{String, String}()
+    for component in components
+        uuid_str = string(component["internal"]["uuid"])
+        upstream_uuids = component["upstream_reservoirs"]
+
+        if isempty(upstream_uuids)
+            parent[uuid_str] = uuid_str  # Root of its own chain
+        else
+            # Assume single upstream reservoir for simplicity
+            parent[uuid_str] = string(upstream_uuids[1])
+        end
+    end
+
+    # Find root of each chain iteratively
+    function find_root(uuid_str)
+        current = uuid_str
+        while parent[current] != current
+            current = parent[current]
+        end
+        return current
+    end
+
+    # Group components by their chain root
+    chains = Dict{String, Vector{Dict}}()
+    for component in components
+        uuid_str = string(component["internal"]["uuid"])
+        root = find_root(uuid_str)
+
+        if !haskey(chains, root)
+            chains[root] = Vector{Dict}()
+        end
+        push!(chains[root], component)
+    end
+
+    # Order each chain from upstream (root) to downstream
+    ordered_components = Vector{Dict}()
+    for (root_uuid, chain) in chains
+        # Sort chain by dependency order - upstream reservoirs first
+        chain_ordered = Vector{Dict}()
+        remaining = Set(chain)
+
+        while !isempty(remaining)
+            # Find next component whose upstream is already processed or is a root
+            for component in remaining
+                upstream_uuids = component["upstream_reservoirs"]
+                can_add =
+                    isempty(upstream_uuids) ||
+                    all(
+                        string(uuid) in
+                        [string(c["internal"]["uuid"]) for c in chain_ordered] for
+                        uuid in upstream_uuids
+                    )
+
+                if can_add
+                    push!(chain_ordered, component)
+                    delete!(remaining, component)
+                    break
+                end
+            end
+        end
+
+        append!(ordered_components, chain_ordered)
+    end
+    return ordered_components
+end
+
+_handle_hydro_reservoirs_deserialization_special_cases(
+    components::Vector{Dict},
+    ::Type{<:Component}) = components
 """
-Return bus with name.
+Return [`ACBus`](@ref) with `name`.
 """
 function get_bus(sys::System, name::AbstractString)
     return get_component(ACBus, sys, name)
 end
 
 """
-Return bus with bus_number.
+Return [`ACBus`](@ref) with `bus_number`.
 """
 function get_bus(sys::System, bus_number::Int)
     for bus in get_components(ACBus, sys)
@@ -2037,7 +2775,15 @@ function get_bus(sys::System, bus_number::Int)
 end
 
 """
-Return all buses values with bus_numbers.
+Return [`ACBus`](@ref)es from a set of identification `number`s
+
+# Examples
+```julia
+# View all the bus ID numbers in the System
+get_number.(get_components(ACBus, system))
+# Select a subset
+buses_by_ID = get_buses(system, Set(101:110))
+```
 """
 function get_buses(sys::System, bus_numbers::Set{Int})
     buses = Vector{ACBus}()
@@ -2077,9 +2823,13 @@ end
 
 check_for_services_on_addition(sys::System, component::Component) = nothing
 
-function check_for_services_on_addition(sys::System, component::Device)
+function check_for_services_on_addition(sys::System, component::T) where {T <: Device}
     if supports_services(component) && length(get_services(component)) > 0
-        throw(ArgumentError("type Device cannot be added with services"))
+        throw(
+            ArgumentError(
+                "type $(IS.strip_module_name(string(T))) cannot be added with services",
+            ),
+        )
     end
     return
 end
@@ -2108,6 +2858,21 @@ end
 function check_attached_buses(sys::System, component::Branch)
     throw_if_not_attached(get_from_bus(component), sys)
     throw_if_not_attached(get_to_bus(component), sys)
+    return
+end
+
+function check_attached_buses(
+    sys::System,
+    component::ThreeWindingTransformer,
+)
+    bus_primary = get_from(get_primary_star_arc(component))
+    bus_secondary = get_from(get_secondary_star_arc(component))
+    bus_tertiary = get_from(get_tertiary_star_arc(component))
+    star_bus = get_star_bus(component)
+    throw_if_not_attached(bus_primary, sys)
+    throw_if_not_attached(bus_secondary, sys)
+    throw_if_not_attached(bus_tertiary, sys)
+    throw_if_not_attached(star_bus, sys)
     return
 end
 
@@ -2142,6 +2907,19 @@ function check_component_removal(sys::System, static_injector::StaticInjection)
     end
 end
 
+function check_component_removal(sys::System, area::Area)
+    for interchange in get_components(AreaInterchange, sys)
+        if area in [get_from_area(interchange), get_to_area(interchange)]
+            throw(
+                ArgumentError(
+                    "Area $(summary(area)) cannot be removed with attached AreaInterchange: $(summary(interchange))",
+                ),
+            )
+        end
+    end
+    return
+end
+
 """
 Refer to docstring for check_component_addition!
 """
@@ -2159,6 +2937,22 @@ function check_component_addition(sys::System, branch::Branch; kwargs...)
     arc = get_arc(branch)
     throw_if_not_attached(get_from(arc), sys)
     throw_if_not_attached(get_to(arc), sys)
+    return
+end
+
+function check_component_addition(
+    sys::System,
+    component::ThreeWindingTransformer;
+    kwargs...,
+)
+    bus_primary = get_from(get_primary_star_arc(component))
+    bus_secondary = get_from(get_secondary_star_arc(component))
+    bus_tertiary = get_from(get_tertiary_star_arc(component))
+    star_bus = get_star_bus(component)
+    throw_if_not_attached(bus_primary, sys)
+    throw_if_not_attached(bus_secondary, sys)
+    throw_if_not_attached(bus_tertiary, sys)
+    throw_if_not_attached(star_bus, sys)
     return
 end
 
@@ -2197,7 +2991,7 @@ function check_component_addition(sys::System, dyn_injector::DynamicInjection; k
     return
 end
 
-function check_component_addition(sys::System, bus::ACBus; kwargs...)
+function check_component_addition(sys::System, bus::Bus; kwargs...)
     number = get_number(bus)
     if number in sys.bus_numbers
         throw(ArgumentError("bus number $number is already stored in the system"))
@@ -2214,9 +3008,11 @@ function check_component_addition(sys::System, bus::ACBus; kwargs...)
     end
 end
 
-function handle_component_addition!(sys::System, bus::ACBus; kwargs...)
+function handle_component_addition!(sys::System, bus::Bus; kwargs...)
     number = get_number(bus)
-    @assert !(number in sys.bus_numbers) "bus number $number is already stored"
+    if number in sys.bus_numbers
+        throw(ArgumentError("bus number $number is already stored"))
+    end
     push!(sys.bus_numbers, number)
     return
 end
@@ -2268,15 +3064,44 @@ function _handle_branch_addition_common!(sys::System, component::Branch)
     return
 end
 
+function _handle_branch_addition_common!(
+    sys::System,
+    component::ThreeWindingTransformer,
+)
+    # If this arc is already attached to the system, assign it to the 3W XFRM.
+    # Else, add it to the system.
+    arcs = [
+        get_primary_star_arc(component),
+        get_secondary_star_arc(component),
+        get_tertiary_star_arc(component),
+    ]
+    set_arc_methods = [
+        set_primary_star_arc!,
+        set_secondary_star_arc!,
+        set_tertiary_star_arc!,
+    ]
+    for (ix, arc) in enumerate(arcs)
+        _arc = get_component(Arc, sys, get_name(arc))
+        if isnothing(_arc)
+            add_component!(sys, arc)
+        else
+            set_arc_methods[ix](component, _arc)
+        end
+    end
+    return
+end
+
 _handle_branch_addition_common!(sys::System, component::AreaInterchange) = nothing
 
 """
 Throws ArgumentError if the bus number is not stored in the system.
 """
-function handle_component_removal!(sys::System, bus::ACBus)
+function handle_component_removal!(sys::System, bus::Bus)
     _handle_component_removal_common!(bus)
     number = get_number(bus)
-    @assert number in sys.bus_numbers "bus number $number is not stored"
+    if !(number in sys.bus_numbers)
+        throw(ArgumentError("bus number $number is not stored"))
+    end
     pop!(sys.bus_numbers, number)
     return
 end
@@ -2292,6 +3117,9 @@ end
 function handle_component_removal!(sys::System, service::Service)
     _handle_component_removal_common!(service)
     for device in get_components(Device, sys)
+        if !supports_services(device)
+            continue
+        end
         _remove_service!(device, service)
     end
 end
@@ -2363,7 +3191,7 @@ function IS.compare_values(
             if !compare_uuids
                 name1 = get_name(val1)
                 name2 = get_name(val2)
-                if !match_fn(name1, name2)
+                if !_fetch_match_fn(match_fn)(name1, name2)
                     @error "values do not match" T name name1 name2
                     match = false
                 end
@@ -2449,6 +3277,8 @@ function convert_component!(
         (from_to = line.rating, to_from = line.rating),
         line.rating,
         line.angle_limits,
+        line.rating_b,
+        line.rating_c,
         line.g,
         line.services,
         line.ext,
@@ -2493,6 +3323,8 @@ function convert_component!(
         line.b,
         line.rating,
         line.angle_limits,
+        line.rating_b,
+        line.rating_c,
         line.g,
         line.services,
         line.ext,
@@ -2526,6 +3358,7 @@ function convert_component!(
         constant_reactive_power = get_reactive_power(old_load),
         max_constant_active_power = get_max_active_power(old_load),
         max_constant_reactive_power = get_max_active_power(old_load),
+        conformity = get_conformity(old_load),
         dynamic_injector = get_dynamic_injector(old_load),
         internal = _copy_internal_for_conversion(old_load),
         services = Device[],
@@ -2541,17 +3374,43 @@ function convert_component!(
     remove_component!(sys, old_load)
 end
 
+"""
+Set the number of a bus.
+"""
+function set_bus_number!(sys::System, bus::Bus, number::Int)
+    throw_if_not_attached(bus, sys)
+
+    orig = get_number(bus)
+    if number == orig
+        return
+    end
+
+    if number in sys.bus_numbers
+        throw(ArgumentError("bus number $number is already stored in the system"))
+    end
+
+    set_number!(bus, number)
+    replace!(sys.bus_numbers, orig => number)
+    return
+end
+
+function set_number!(bus::ACBus, number::Int)
+    Base.depwarn(
+        "This method will be removed in v5.0 because its use breaks system consistency" *
+        "checks. Please call `set_bus_number!(::System, bus, number)` instead.",
+        :set_number!,
+    )
+    bus.number = number
+    return
+end
+
 # Use this function to avoid deepcopy of shared_system_references.
 function _copy_internal_for_conversion(component::Component)
     internal = get_internal(component)
-    refs = internal.shared_system_references
     return InfrastructureSystemsInternal(;
         uuid = deepcopy(internal.uuid),
         units_info = deepcopy(internal.units_info),
-        shared_system_references = IS.SharedSystemReferences(;
-            supplemental_attribute_manager = refs.supplemental_attribute_manager,
-            time_series_manager = refs.time_series_manager,
-        ),
+        shared_system_references = nothing,
         ext = deepcopy(internal.ext),
     )
 end
@@ -2572,7 +3431,7 @@ function _validate_or_skip!(sys, component, skip_validation)
     if !skip_validation
         sanitize_component!(component, sys)
         if !validate_component_with_system(component, sys)
-            throw(IS.InvalidValue("Invalid value for $component"))
+            throw(IS.InvalidValue("Invalid value for $(summary(component))"))
         end
     end
 
@@ -2600,3 +3459,61 @@ function check_time_series_consistency(sys::System, ::Type{T}) where {T <: TimeS
 end
 
 stores_time_series_in_memory(sys::System) = IS.stores_time_series_in_memory(sys.data)
+
+"""
+Make a `deepcopy` of a [`System`](@ref) more quickly by skipping the copying of time
+series and/or supplemental attributes.
+
+# Arguments
+
+  - `sys::`[`System`](@ref): the `System` to copy
+  - `skip_time_series::Bool = true`: whether to skip copying time series
+  - `skip_supplemental_attributes::Bool = true`: whether to skip copying supplemental
+    attributes
+
+Note that setting both `skip_time_series` and `skip_supplemental_attributes` to `false`
+results in the same behavior as `deepcopy` with no performance improvement.
+"""
+function fast_deepcopy_system(
+    sys::System;
+    skip_time_series::Bool = true,
+    skip_supplemental_attributes::Bool = true,
+)
+    new_data = IS.fast_deepcopy_system(
+        sys.data;
+        skip_time_series = skip_time_series,
+        skip_supplemental_attributes = skip_supplemental_attributes,
+    )
+    new_sys = System(
+        new_data,
+        deepcopy(sys.units_settings),
+        deepcopy(sys.internal);
+        runchecks = deepcopy(sys.runchecks[]),
+        frequency = deepcopy(sys.frequency),
+        time_series_directory = deepcopy(sys.time_series_directory),
+        name = deepcopy(sys.metadata.name),
+        description = deepcopy(sys.metadata.description))
+    # deepcopying sys.data separately from sys.units_settings broke the shared units references, so we have to fix them here
+    for comp in iterate_components(new_sys)
+        comp.internal.units_info = new_sys.units_settings
+    end
+    return new_sys
+end
+
+"""
+Return a DataFrame with the number of static time series for components and supplemental
+attributes.
+"""
+function get_static_time_series_summary_table(sys::System)
+    return IS.get_static_time_series_summary_table(sys.data)
+end
+
+"""
+Return a DataFrame with the number of forecasts for components and supplemental
+attributes.
+"""
+function get_forecast_summary_table(sys::System)
+    return IS.get_forecast_summary_table(sys.data)
+end
+
+IS.get_base_component_type(sys::System) = Component

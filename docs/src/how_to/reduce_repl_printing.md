@@ -1,4 +1,4 @@
-# Reduce REPL printing
+# [Reduce REPL printing](@id reduce_repl_printing)
 
 By default `PowerSystems.jl` outputs to the REPL all Logging statements, which can be
 overwhelming in some cases.
@@ -8,7 +8,7 @@ statements should be printed to the console or a log file:
 
 **Example**: Set log output to only see error messages in the console
 
-```julia
+```@example reduce_repl_printing
 using PowerSystems
 using Logging
 configure_logging(; console_level = Logging.Error)
@@ -18,6 +18,6 @@ configure_logging(; console_level = Logging.Error)
 `flush(logger)` to make this happen.
 
 [Refer to this
-page](https://nrel-sienna.github.io/InfrastructureSystems.jl/stable/dev_guide/logging/#Use-Cases)
+page](https://sienna-platform.github.io/InfrastructureSystems.jl/stable/dev_guide/logging/#Use-Cases)
 for more logging configuration options. Note that it describes how to enable
 debug logging for some log messages but not others.

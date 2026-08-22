@@ -1,4 +1,4 @@
-
+import InfrastructureSystems
 mutable struct TestDevice <: Device
     name::String
 end
@@ -6,6 +6,12 @@ end
 mutable struct TestRenDevice <: RenewableGen
     name::String
 end
+
+mutable struct TestInjector <: StaticInjection
+    name::String
+end
+
+struct NonexistentComponent <: StaticInjection end
 
 """Return the first component of type component_type that matches the name of other."""
 function get_component_by_name(sys::System, component_type, other::Component)
@@ -41,6 +47,7 @@ function create_system_with_dynamic_inverter()
         ACBus(
             1, #number
             "Bus 1", #Name
+            true, #available
             "REF", #ACBusType (REF, PV, PQ)
             0, #Angle in radians
             1.06, #Voltage in pu
@@ -49,7 +56,18 @@ function create_system_with_dynamic_inverter()
             nothing,
             nothing,
         ), #Base voltage in kV
-        ACBus(2, "Bus 2", "PV", 0, 1.045, (min = 0.94, max = 1.06), 69, nothing, nothing),
+        ACBus(
+            2,
+            "Bus 2",
+            true,
+            "PV",
+            0,
+            1.045,
+            (min = 0.94, max = 1.06),
+            69,
+            nothing,
+            nothing,
+        ),
     ]
 
     battery = EnergyReservoirStorage(;
@@ -173,35 +191,39 @@ function create_system_with_outages()
     gens = collect(get_components(ThermalStandard, sys))
     gen1 = gens[1]
     gen2 = gens[2]
-    geo1 = GeographicInfo(; geo_json = Dict("x" => 1.0, "y" => 2.0))
-    geo2 = GeographicInfo(; geo_json = Dict("x" => 3.0, "y" => 4.0))
-    add_supplemental_attribute!(sys, gen1, geo1)
-    add_supplemental_attribute!(sys, gen1.bus, geo1)
-    add_supplemental_attribute!(sys, gen2, geo2)
-    add_supplemental_attribute!(sys, gen2.bus, geo2)
-    initial_time = Dates.DateTime("2020-01-01T00:00:00")
-    end_time = Dates.DateTime("2020-01-01T23:00:00")
-    dates = collect(initial_time:Dates.Hour(1):end_time)
-    fo1 = GeometricDistributionForcedOutage(;
-        mean_time_to_recovery = 1.0,
-        outage_transition_probability = 0.5,
-    )
-    fo2 = GeometricDistributionForcedOutage(;
-        mean_time_to_recovery = 2.0,
-        outage_transition_probability = 0.5,
-    )
-    po1 = PlannedOutage(; outage_schedule = "1")
-    po2 = PlannedOutage(; outage_schedule = "2")
-    add_supplemental_attribute!(sys, gen1, fo1)
-    add_supplemental_attribute!(sys, gen1, po1)
-    add_supplemental_attribute!(sys, gen2, fo2)
-    add_supplemental_attribute!(sys, gen2, po2)
-    for (i, outage) in enumerate((fo1, fo2, po1, po2))
-        data = collect(i:(i + 23))
-        ta = TimeSeries.TimeArray(dates, data, ["1"])
-        name = "ts_$(i)"
-        ts = SingleTimeSeries(; name = name, data = ta)
-        add_time_series!(sys, outage, ts)
+    geo1 = GeographicInfo(; geo_json = Dict("type" => "Point", "coordinates" => [1.0, 2.0]))
+    geo2 = GeographicInfo(; geo_json = Dict("type" => "Point", "coordinates" => [3.0, 4.0]))
+    begin_time_series_update(sys) do
+        begin_supplemental_attributes_update(sys) do
+            add_supplemental_attribute!(sys, gen1, geo1)
+            add_supplemental_attribute!(sys, gen1.bus, geo1)
+            add_supplemental_attribute!(sys, gen2, geo2)
+            add_supplemental_attribute!(sys, gen2.bus, geo2)
+            initial_time = Dates.DateTime("2020-01-01T00:00:00")
+            end_time = Dates.DateTime("2020-01-01T23:00:00")
+            dates = collect(initial_time:Dates.Hour(1):end_time)
+            fo1 = GeometricDistributionForcedOutage(;
+                mean_time_to_recovery = 1.0,
+                outage_transition_probability = 0.5,
+            )
+            fo2 = GeometricDistributionForcedOutage(;
+                mean_time_to_recovery = 2.0,
+                outage_transition_probability = 0.5,
+            )
+            po1 = PlannedOutage(; outage_schedule = "1")
+            po2 = PlannedOutage(; outage_schedule = "2")
+            add_supplemental_attribute!(sys, gen1, fo1)
+            add_supplemental_attribute!(sys, gen1, po1)
+            add_supplemental_attribute!(sys, gen2, fo2)
+            add_supplemental_attribute!(sys, gen2, po2)
+            for (i, outage) in enumerate((fo1, fo2, po1, po2))
+                data = collect(i:(i + 23))
+                ta = TimeSeries.TimeArray(dates, data, ["1"])
+                name = "ts_$(i)"
+                ts = SingleTimeSeries(; name = name, data = ta)
+                add_time_series!(sys, outage, ts)
+            end
+        end
     end
 
     return sys

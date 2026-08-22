@@ -1,12 +1,13 @@
 """
-Supertype for operational cost representations
+Abstract supertype for all operational cost representations.
 
-Current concrete types include:
+Concrete subtypes:
 - [`ThermalGenerationCost`](@ref)
 - [`HydroGenerationCost`](@ref)
 - [`RenewableGenerationCost`](@ref)
 - [`StorageCost`](@ref)
 - [`LoadCost`](@ref)
+- [`ImportExportCost`](@ref)
 - [`MarketBidCost`](@ref)
 """
 abstract type OperationalCost <: DeviceParameter end

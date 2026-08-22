@@ -12,10 +12,10 @@ process to obtain the data and its interpretation:
   - [Static Time Series Data](@ref)
   - [Forecasts](@ref)
 
-These categories are are all subtypes of `TimeSeriesData` and fall within this time series
-type hierarchy:
+These categories are are all subtypes of [`TimeSeriesData`](@ref) and fall within this time series
+[type hierarchy](@ref type_structure):
 
-```@repl
+```@example
 using PowerSystems #hide
 import TypeTree: tt #hide
 docs_dir = joinpath(pkgdir(PowerSystems), "docs", "src", "tutorials", "utils"); #hide
@@ -26,7 +26,7 @@ print(join(tt(TimeSeriesData), "")) #hide
 ### Static Time Series Data
 
 A static time series data is a single column of data where each time period has a single
-value assigned to a component field, such as its maximum active power. This data commonly
+value assigned to a component field, such as its [maximum active power](@ref power_concepts). This data commonly
 is obtained from historical information or the realization of a time-varying quantity.
 
 Static time series usually comes in the following format, with a set [resolution](@ref R)
@@ -40,7 +40,7 @@ between the time-stamps:
 
 This example is a 1-hour resolution static time-series.
 
-In PowerSystems, a static time series is represented using [`SingleTimeSeries`](@ref).
+In `PowerSystems.jl`, a static time series is represented using [`SingleTimeSeries`](@ref).
 
 ### Forecasts
 
@@ -65,7 +65,7 @@ represent the forecasted values at each step in the forecast [horizon](@ref H).
 
 This example forecast has a [interval](@ref I) of 1 hour and a [horizon](@ref H) of 8.
 
-PowerSystems defines the following Julia structs to represent forecasts:
+`PowerSystems.jl` defines the following Julia [structs](@ref S) to represent forecasts:
 
   - [`Deterministic`](@ref): Point forecast without any uncertainty representation.
   - [`Probabilistic`](@ref): Stores a discretized cumulative distribution functions
@@ -74,12 +74,29 @@ PowerSystems defines the following Julia structs to represent forecasts:
   - [`Scenarios`](@ref): Stores a set of probable trajectories for forecasted quantity
     with equal probability.
 
+## Multiple Forecast Intervals
+
+PowerSystems supports attaching multiple forecast groups to the same component, where each
+group shares the same name and resolution but differs by [interval](@ref I). This is useful
+when a component needs forecasts updated at different frequencies — for example, an
+hourly-updated forecast and a daily-updated forecast for the same quantity.
+
+Use [`transform_single_time_series!`](@ref) with `delete_existing = false` to create
+multiple [`DeterministicSingleTimeSeries`](@ref) transforms from the same
+[`SingleTimeSeries`](@ref), each with a different interval. When multiple forecasts share
+the same name and resolution, the `interval` keyword argument must be specified to
+disambiguate retrieval and removal; omitting it raises an `ArgumentError`.
+
+For a worked example, see the
+[Transform with Multiple Intervals](@ref "Working with Time Series Data") section of the
+time series tutorial.
+
 ## Data Storage
 
 By default PowerSystems stores time series data in an HDF5 file.
 This prevents
 large datasets from overwhelming system memory. Refer to this
-[page](https://nrel-sienna.github.io/InfrastructureSystems.jl/stable/dev_guide/time_series/#Data-Format)
+[page](https://sienna-platform.github.io/InfrastructureSystems.jl/stable/dev_guide/time_series/#Data-Format)
 for details on how the time series data is stored in HDF5 files.
 
 Time series data can be stored actual component values (for instance MW) or scaling
@@ -100,4 +117,4 @@ store a scaling factor time series that will get multiplied by the maximum activ
 rather than the magnitudes of the maximum active power time series.
 
 Examples of how to create and add time series to system can be found in the
-[Add Time Series Example](https://nrel-sienna.github.io/PowerSystems.jl/stable/tutorials/add_forecasts/)
+[Add Time Series Example](https://sienna-platform.github.io/PowerSystems.jl/stable/tutorials/add_forecasts/)

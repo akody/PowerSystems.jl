@@ -47,7 +47,7 @@ Parameters of IEEE Std 421.5 Type DC2A Excitacion System. This model corresponds
 - `Se::Tuple{Float64, Float64}`: Exciter saturation factor at exciter output voltage: (Se(E1), Se(E2))
 - `V_ref::Float64`: (default: `1.0`) Reference Voltage Set-point (pu), validation range: `(0, nothing)`
 - `saturation_coeffs::Tuple{Float64, Float64}`: (default: `PowerSystems.get_avr_saturation(E_sat, Se)`) (**Do not modify.**) Coefficients (A,B) of the function: Se(V) = B(V - A)^2/V
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) are:
 	Vt: Terminal Voltage,
 	Vr1: input lead lag,
@@ -55,7 +55,7 @@ Parameters of IEEE Std 421.5 Type DC2A Excitacion System. This model corresponds
 	Vf: Exciter Output, 
 	Vr3: Rate feedback integrator
 - `n_states::Int`: (**Do not modify.**) The ESDC2A has 5 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) ESDC2A has 5 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) ESDC2A has 5 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct ESDC2A <: AVR
@@ -89,7 +89,7 @@ mutable struct ESDC2A <: AVR
     V_ref::Float64
     "(**Do not modify.**) Coefficients (A,B) of the function: Se(V) = B(V - A)^2/V"
     saturation_coeffs::Tuple{Float64, Float64}
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) are:
 	Vt: Terminal Voltage,
@@ -100,7 +100,7 @@ mutable struct ESDC2A <: AVR
     states::Vector{Symbol}
     "(**Do not modify.**) The ESDC2A has 5 states"
     n_states::Int
-    "(**Do not modify.**) ESDC2A has 5 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) ESDC2A has 5 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

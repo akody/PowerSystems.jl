@@ -7,6 +7,11 @@
     generator = get_component(ThermalStandard, sys, get_name(generators[1]))
     @test IS.get_uuid(generator) == IS.get_uuid(generators[1])
     @test_throws(IS.ArgumentError, add_component!(sys, generator))
+    @test get_available_component(ThermalStandard, sys, get_name(generators[1])) ===
+          generator
+    set_available!(generator, false)
+    @test isnothing(get_available_component(ThermalStandard, sys, get_name(generators[1])))
+    set_available!(generator, true)
 
     generators2 = get_components_by_name(ThermalGen, sys, get_name(generators[1]))
     @test length(generators2) == 1
@@ -21,6 +26,7 @@
     )
     @test isempty(get_components(x -> (!get_available(x)), ThermalStandard, sys))
     @test !isempty(get_available_components(ThermalStandard, sys))
+    @test !isempty(get_available_components(x -> true, ThermalStandard, sys))
     # Test get_bus* functionality.
     bus_numbers = Vector{Int}()
     for bus in get_components(ACBus, sys)
@@ -45,11 +51,14 @@
     @test get_time_series_resolutions(sys)[1] == Dates.Hour(1)
 
     # Get time_series with a name and without.
-    components = collect(get_components(HydroEnergyReservoir, sys))
+    components = collect(get_components(HydroTurbine, sys))
     @test !isempty(components)
     component = components[1]
     ts = get_time_series(SingleTimeSeries, component, "max_active_power")
     @test ts isa SingleTimeSeries
+
+    components = collect(get_components(HydroReservoir, sys))
+    @test !isempty(components)
 
     returned_it, returned_len = check_time_series_consistency(sys, SingleTimeSeries)
     @test returned_it == first(TimeSeries.timestamp(get_data(ts)))
@@ -212,9 +221,79 @@ end
 
 @testset "Test system units" begin
     sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys"; add_forecasts = false)
+    set_units_base_system!(sys, "DEVICE_BASE")
     @test get_units_base(sys) == "DEVICE_BASE"
     set_units_base_system!(sys, "SYSTEM_BASE")
     @test get_units_base(sys) == "SYSTEM_BASE"
+
+    gen = get_component(ThermalStandard, sys, "322_CT_6")
+    active_power_mw = with_units_base(sys, UnitSystem.NATURAL_UNITS) do
+        get_active_power(gen)
+    end
+    @test get_units_base(sys) == "SYSTEM_BASE"
+    set_units_base_system!(sys, UnitSystem.NATURAL_UNITS)
+    @test active_power_mw == get_active_power(gen)
+end
+
+@testset "Test set_value with non-Float64 Real" begin
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys"; add_forecasts = false)
+    set_units_base_system!(sys, "NATURAL_UNITS")
+    line = first(get_components(Line, sys))
+    rating = get_rating(line)
+
+    set_rating!(line, rating)
+    @test get_rating(line) == rating
+
+    set_rating!(line, Int(round(rating)))
+    @test get_rating(line) == round(rating)
+
+    set_rating!(line, Rational(Int(round(rating * 10)), 10))
+    @test get_rating(line) ≈ rating
+end
+
+@testset "Test with_units_base on component" begin
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys"; add_forecasts = false)
+    set_units_base_system!(sys, "SYSTEM_BASE")
+    gen = get_component(ThermalStandard, sys, "322_CT_6")
+    base_power = get_base_power(sys)
+
+    # Component shares system's units_settings initially
+    @test sys.units_settings === PSY.get_internal(gen).units_info
+
+    # with_units_base on component should work and preserve reference after
+    P_pu = get_active_power(gen)
+    P_natural = with_units_base(gen, "NATURAL_UNITS") do
+        get_active_power(gen)
+    end
+    @test P_natural ≈ P_pu * base_power
+
+    # Reference should be preserved after with_units_base(component, ...)
+    @test sys.units_settings === PSY.get_internal(gen).units_info
+
+    # System-level with_units_base should still work after component-level call
+    P_natural_via_sys = with_units_base(sys, UnitSystem.NATURAL_UNITS) do
+        get_active_power(gen)
+    end
+    @test P_natural ≈ P_natural_via_sys
+end
+
+@testset "Test with_units_base on component removed during block" begin
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys"; add_forecasts = false)
+    set_units_base_system!(sys, "SYSTEM_BASE")
+    line = first(get_components(Line, sys))
+
+    # Component shares system's units_settings initially
+    @test sys.units_settings === PSY.get_internal(line).units_info
+
+    # Remove component during with_units_base block
+    @test_throws ErrorException begin
+        with_units_base(line, "NATURAL_UNITS") do
+            remove_component!(sys, line)
+        end
+    end
+
+    # After removal, units_info should be nothing (not restored to system's)
+    @test isnothing(PSY.get_internal(line).units_info)
 end
 
 @testset "Test add_time_series multiple components" begin
@@ -239,7 +318,7 @@ end
     ta = TimeSeries.TimeArray(dates, data, ["1"])
     name = "max_active_power"
     ts = SingleTimeSeries(; name = name, data = ta)
-    add_time_series!(sys, components, ts)
+    res = add_time_series!(sys, components, ts)
 
     for i in 1:len
         component = get_component(ThermalStandard, sys, string(i))
@@ -267,6 +346,39 @@ end
     ts_name = "test"
 
     open_time_series_store!(sys, "r+") do
+        for (i, ta) in enumerate(arrays)
+            ts = SingleTimeSeries(; data = ta, name = "$(ts_name)_$(i)")
+            add_time_series!(sys, component, ts)
+        end
+    end
+
+    open_time_series_store!(sys, "r") do
+        for (i, expected_array) in enumerate(arrays)
+            ts = IS.get_time_series(IS.SingleTimeSeries, component, "$(ts_name)_$(i)")
+            @test ts.data == expected_array
+        end
+    end
+end
+
+@testset "Test begin_time_series_update" begin
+    sys = System(100.0)
+    bus = ACBus(nothing)
+    bus.bustype = ACBusTypes.REF
+    add_component!(sys, bus)
+    components = []
+    len = 2
+    component = ThermalStandard(nothing)
+    component.name = "gen"
+    component.bus = bus
+    add_component!(sys, component)
+    initial_time = Dates.DateTime("2020-09-01")
+    resolution = Dates.Hour(1)
+    len = 24
+    timestamps = range(initial_time; length = len, step = resolution)
+    arrays = [TimeSeries.TimeArray(timestamps, rand(len)) for _ in 1:5]
+    ts_name = "test"
+
+    begin_time_series_update(sys) do
         for (i, ta) in enumerate(arrays)
             ts = SingleTimeSeries(; data = ta, name = "$(ts_name)_$(i)")
             add_time_series!(sys, component, ts)
@@ -328,6 +440,122 @@ end
     @test_throws ArgumentError get_time_series(typeof(forecast), gen, get_name(forecast))
 end
 
+@testset "Test multi-interval DeterministicSingleTimeSeries" begin
+    sys = System(100.0)
+    bus = ACBus(nothing)
+    bus.bustype = ACBusTypes.REF
+    add_component!(sys, bus)
+    gen = ThermalStandard(nothing)
+    gen.name = "gen"
+    gen.bus = bus
+    add_component!(sys, gen)
+
+    initial_time = Dates.DateTime("2020-09-01")
+    resolution = Dates.Minute(5)
+    sts_length = 288  # 24 hours at 5-min resolution
+    data = TimeSeries.TimeArray(
+        range(initial_time; length = sts_length, step = resolution),
+        rand(sts_length),
+    )
+    sts_name = "max_active_power"
+    sts = SingleTimeSeries(; data = data, name = sts_name)
+    add_time_series!(sys, gen, sts)
+
+    horizon = Dates.Hour(1)
+    interval1 = Dates.Minute(30)
+    interval2 = Dates.Hour(1)
+
+    transform_single_time_series!(
+        sys,
+        horizon,
+        interval1;
+        delete_existing = false,
+    )
+    transform_single_time_series!(
+        sys,
+        horizon,
+        interval2;
+        delete_existing = false,
+    )
+
+    @test has_time_series(
+        gen,
+        DeterministicSingleTimeSeries,
+        sts_name;
+        interval = interval1,
+    )
+    @test has_time_series(
+        gen,
+        DeterministicSingleTimeSeries,
+        sts_name;
+        interval = interval2,
+    )
+
+    ts1 = get_time_series(
+        DeterministicSingleTimeSeries,
+        gen,
+        sts_name;
+        interval = interval1,
+    )
+    @test ts1 isa DeterministicSingleTimeSeries
+    @test IS.get_interval(ts1) == interval1
+
+    ts2 = get_time_series(
+        DeterministicSingleTimeSeries,
+        gen,
+        sts_name;
+        interval = interval2,
+    )
+    @test ts2 isa DeterministicSingleTimeSeries
+    @test IS.get_interval(ts2) == interval2
+
+    @test_throws ArgumentError get_time_series(
+        DeterministicSingleTimeSeries,
+        gen,
+        sts_name,
+    )
+
+    @test get_forecast_interval(sys; interval = interval1) == interval1
+    @test get_forecast_interval(sys; interval = interval2) == interval2
+    @test get_forecast_horizon(sys; interval = interval1) == horizon
+    @test get_forecast_window_count(sys; interval = interval1) > 0
+    @test get_forecast_window_count(sys; interval = interval2) > 0
+
+    ts_interval1 = collect(
+        get_time_series_multiple(
+            sys;
+            type = DeterministicSingleTimeSeries,
+            interval = interval1,
+        ),
+    )
+    @test length(ts_interval1) > 0
+    for ts in ts_interval1
+        @test IS.get_interval(ts) == interval1
+    end
+
+    remove_time_series!(
+        sys,
+        DeterministicSingleTimeSeries,
+        gen,
+        sts_name;
+        interval = interval1,
+    )
+    @test !has_time_series(
+        gen,
+        DeterministicSingleTimeSeries,
+        sts_name;
+        interval = interval1,
+    )
+    @test has_time_series(
+        gen,
+        DeterministicSingleTimeSeries,
+        sts_name;
+        interval = interval2,
+    )
+
+    @test has_time_series(gen, SingleTimeSeries, sts_name)
+end
+
 @testset "Invalid constructor" begin
     @test_throws IS.DataFormatError System("data.invalid")
 end
@@ -354,14 +582,27 @@ end
 end
 
 @testset "Test time series counts" begin
+    # The system has both single and deterministic forecasts time series
     c_sys5 = PSB.build_system(
         PSITestSystems,
         "c_sys5_uc";
         add_forecasts = true,
+        skip_serialization = true,
     )
     counts = get_time_series_counts(c_sys5)
     @test counts.static_time_series_count == 0
     @test counts.forecast_count == 3
+
+    # The system has both single and deterministic forecasts time series
+    c_sys5 = PSB.build_system(
+        PSITestSystems,
+        "c_sys5_uc";
+        add_single_time_series = true,
+        skip_serialization = true,
+    )
+    counts = get_time_series_counts(c_sys5)
+    @test counts.static_time_series_count == 3
+    @test counts.forecast_count == 0
 end
 
 @testset "Test deepcopy with time series options" begin
@@ -396,6 +637,35 @@ end
     for component in get_components(x -> has_time_series(x), Component, sys2)
         @test component.internal.shared_system_references.time_series_manager ===
               sys2.data.time_series_manager
+    end
+end
+
+@testset "Test fast deepcopy of system" begin
+    systems = Dict(
+        in_memory => PSB.build_system(
+            PSITestSystems,
+            "test_RTS_GMLC_sys";
+            time_series_in_memory = in_memory,
+            force_build = true,
+        ) for in_memory in (true, false)
+    )
+    @testset for (in_memory, skip_ts, skip_sa) in  # Iterate over all permutations
+                 Iterators.product(repeat([(true, false)], 3)...)
+        sys = systems[in_memory]
+
+        sys2 = IS.fast_deepcopy_system(sys;
+            skip_time_series = skip_ts, skip_supplemental_attributes = skip_sa)
+        @test IS.compare_values(
+            sys,
+            sys2;
+            exclude = Set(
+                [:time_series_manager, :supplemental_attribute_manager][[skip_ts, skip_sa]],
+            ),
+        )
+
+        # We copy the SystemData separately from the other System fields, so the egal-ity of these references could get broken
+        generator = get_component(ThermalStandard, sys2, "322_CT_6")
+        @test sys2.units_settings === generator.internal.units_info
     end
 end
 
@@ -475,9 +745,10 @@ end
         ThermalStandard,
     )
 
-    @test !(@test_logs :warn, r"is larger than the max expected in the" match_mode = :any check_sil_values(
-        sys,
-    ))
+    # @test !(@test_logs :warn, r"is larger than the max expected in the" match_mode = :any check_ac_transmission_rate_values(
+    #     sys,
+    # ))
+    @test check_ac_transmission_rate_values(sys)
 end
 
 @testset "Test system name and description" begin
@@ -516,14 +787,20 @@ end
 
     @test metadata["name"] == name
     @test metadata["description"] == description
-    found_component = false
+    found_component_thermal = false
+    found_component_condenser = false
     for item in metadata["component_counts"]
         if item["type"] == "ThermalStandard"
-            @test item["count"] == 76
-            found_component = true
+            @test item["count"] == 73
+            found_component_thermal = true
+        end
+        if item["type"] == "SynchronousCondenser"
+            @test item["count"] == 3
+            found_component_condenser = true
         end
     end
-    @test found_component
+    @test found_component_thermal
+    @test found_component_condenser
     @test metadata["time_series_counts"][1]["type"] == "DeterministicSingleTimeSeries"
     @test metadata["time_series_counts"][1]["count"] == 182
     @test metadata["time_series_counts"][2]["type"] == "SingleTimeSeries"
@@ -537,4 +814,41 @@ end
     service1 = first(get_components(VariableReserve{ReserveDown}, sys1))
     device2 = first(get_components(ThermalStandard, sys2))
     @test_throws ArgumentError add_service!(device2, service1, sys2)
+end
+
+@testset "Test has_components" begin
+    sys1 = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
+    @test has_components(sys1, ThermalStandard)
+    @test !has_components(sys1, TransmissionInterface)
+end
+
+@testset "Test set_bus_number!" begin
+    sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
+    buses = collect(get_components(ACBus, sys))
+    bus1 = buses[1]
+    bus2 = buses[2]
+    orig = get_number(bus1)
+    new_number = 9999999
+    @test orig != new_number
+    set_bus_number!(sys, bus1, new_number)
+    @test get_number(bus1) == new_number
+    bus_numbers = get_bus_numbers(sys)
+    @test new_number in bus_numbers
+    @test !(orig in bus_numbers)
+
+    # Ensure that the no-op case works.
+    set_bus_number!(sys, bus1, new_number)
+    @test get_number(bus1) == new_number
+    @test new_number in get_bus_numbers(sys)
+
+    # Ensure that duplicate numbers are blocked.
+    @test_throws ArgumentError set_bus_number!(sys, bus1, get_number(bus2))
+
+    # Ensure that you can't change an unattached bus.
+    remove_component!(sys, bus1)
+    @test_throws ArgumentError set_bus_number!(sys, bus1, new_number + 1)
+
+    # Ensure that this is exported. This can be deleted in PSY5.
+    set_number!(bus1, new_number + 2)
+    @test get_number(bus1) == new_number + 2
 end

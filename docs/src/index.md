@@ -5,26 +5,23 @@ CurrentModule = PowerSystems
 ```
 
 !!! tip "Announcement"
-    
-    PowerSystems.jl upgraded to version 4.0 in June 2024, which included breaking changes.
-    Visit the [v4.0 migration guide](@ref psy4_migration) for information on
-    how to update your existing code.
-    
-    We also have re-organized and updated this documentation, including new tutorials! Check
-    out [How To Use This Documentation](@ref) below to orient yourself.
+
+    PowerSystems.jl upgraded to version 5.0 in November 2025, which included breaking changes.
+    Visit the [v5.0 migration guide](@ref psy5_migration) for information on
+    how to update your existing code from version 4.0.
 
 ## About
 
-`PowerSystems.jl` is part of the National Renewable Energy Laboratory's
-[Sienna ecosystem](https://www.nrel.gov/analysis/sienna.html), an open source framework for
+`PowerSystems.jl` is part of the National Laboratory of the Rockies'
+[Sienna ecosystem](https://www.nlr.gov/analysis/sienna.html), an open source framework for
 scheduling problems and dynamic simulations for power systems. The Sienna ecosystem can be
-[found on github](https://github.com/NREL-Sienna/Sienna). It contains three applications:
+[found on github](https://github.com/Sienna-Platform/Sienna). It contains three applications:
 
-  - [Sienna\Data](https://github.com/NREL-Sienna/Sienna?tab=readme-ov-file#siennadata) enables
+  - [Sienna\Data](https://github.com/Sienna-Platform/Sienna?tab=readme-ov-file#siennadata) enables
     efficient data input, analysis, and transformation
-  - [Sienna\Ops](https://github.com/NREL-Sienna/Sienna?tab=readme-ov-file#siennaops) enables
+  - [Sienna\Ops](https://github.com/Sienna-Platform/Sienna?tab=readme-ov-file#siennaops) enables
     enables system scheduling simulations by formulating and solving optimization problems
-  - [Sienna\Dyn](https://github.com/NREL-Sienna/Sienna?tab=readme-ov-file#siennadyn) enables
+  - [Sienna\Dyn](https://github.com/Sienna-Platform/Sienna?tab=readme-ov-file#siennadyn) enables
     system transient analysis including small signal stability and full system dynamic
     simulations
 
@@ -67,19 +64,15 @@ There are five main sections containing different information:
 `PowerSystems.jl` strives to follow the [Diataxis](https://diataxis.fr/) documentation
 framework.
 
-## Getting Started
+## Installation and Quick Links
 
-If you are new to `PowerSystems.jl`, here's how we suggest getting started:
+  - [Sienna installation page](https://sienna-platform.github.io/Sienna/SiennaDocs/docs/build/how-to/install/):
+    Instructions to install `PowerSystems.jl` and other Sienna packages
 
- 1. [Install](@ref install)
+!!! note
 
- 2. Work through the introductory tutorial: [Create and Explore a Power `System`](@ref) to
-    familiarize yourself with how `PowerSystems.jl` works
- 3. Work through the other basic tutorials based on your interests
-    
-      + See [Working with Time Series Data](@ref tutorial_time_series) if you will be doing
-        production cost modeling or working with time series
-      + See [Adding Data for Dynamic Simulations](@ref)
-        if you are interested in [dynamic](@ref D) simulations
- 4. Then, see the how-to's on parsing [Matpower](@ref pm_data) or [PSS/e files](@ref dyr_data) or
-    [CSV files](@ref table_data) to begin loading your own data into `PowerSystems.jl`
+    `PowerSystems.jl` uses [`InfrastructureSystems.jl`](https://sienna-platform.github.io/InfrastructureSystems.jl/stable/) as a utility library. Many methods are re-exported from `InfrastructureSystems.jl`.
+    For most users there is no need to import `InfrastructureSystems.jl`.
+
+  - [Sienna Documentation Hub](https://sienna-platform.github.io/Sienna/SiennaDocs/docs/build/index.html):
+    Links to other Sienna packages' documentation

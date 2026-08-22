@@ -1,4 +1,3 @@
-
 """Container for data parsed by PowerModels"""
 struct PowerModelsData
     data::Dict{String, Any}
@@ -24,11 +23,11 @@ function PowerModelsData(file::Union{String, IO}; kwargs...)
 end
 
 """
-Constructs a System from PowerModelsData.
+Constructs a [`System`](@ref) from [`PowerModelsData`](@ref).
 
 # Arguments
-- `pm_data::Union{PowerModelsData, Union{String, IO}}`: PowerModels data object or supported
-load flow case (*.m, *.raw)
+- `pm_data::Union{PowerModelsData, Union{String, IO}}`: [`PowerModelsData`](@ref) object or
+    supported load-flow case (*.m, *.raw)
 
 # Keyword arguments
 - `ext::Dict`: Contains user-defined parameters. Should only contain standard types.
@@ -58,37 +57,62 @@ function System(pm_data::PowerModelsData; kwargs...)
     @info "Constructing System from Power Models" data["name"] data["source_type"]
 
     sys = System(data["baseMVA"]; kwargs...)
+    source_type = data["source_type"]
 
     bus_number_to_bus = read_bus!(sys, data; kwargs...)
     read_loads!(sys, data, bus_number_to_bus; kwargs...)
     read_loadzones!(sys, data, bus_number_to_bus; kwargs...)
     read_gen!(sys, data, bus_number_to_bus; kwargs...)
+    for component_type in ["switch", "breaker"]
+        read_switch_breaker!(sys, data, bus_number_to_bus, component_type; kwargs...)
+    end
     read_branch!(sys, data, bus_number_to_bus; kwargs...)
+    read_switched_shunt!(sys, data, bus_number_to_bus; kwargs...)
     read_shunt!(sys, data, bus_number_to_bus; kwargs...)
-    read_dcline!(sys, data, bus_number_to_bus; kwargs...)
+    read_dcline!(sys, data, bus_number_to_bus, source_type; kwargs...)
+    read_vscline!(sys, data, bus_number_to_bus; kwargs...)
+    read_facts!(sys, data, bus_number_to_bus; kwargs...)
     read_storage!(sys, data, bus_number_to_bus; kwargs...)
+    read_3w_transformer!(sys, data, bus_number_to_bus; kwargs...)
     if runchecks
         check(sys)
     end
+
+    substation_data = get(data, "substation_data", [])
+    add_geographic_info_to_buses!(sys, substation_data)
+
     return sys
 end
 
 function correct_pm_transformer_status!(pm_data::PowerModelsData)
     for (k, branch) in pm_data.data["branch"]
+        f_bus_bvolt = pm_data.data["bus"][branch["f_bus"]]["base_kv"]
+        t_bus_bvolt = pm_data.data["bus"][branch["t_bus"]]["base_kv"]
+        percent_difference =
+            abs(f_bus_bvolt - t_bus_bvolt) / ((f_bus_bvolt + t_bus_bvolt) / 2)
         if !branch["transformer"] &&
-           pm_data.data["bus"][branch["f_bus"]]["base_kv"] !=
-           pm_data.data["bus"][branch["t_bus"]]["base_kv"]
+           percent_difference > BRANCH_BUS_VOLTAGE_DIFFERENCE_TOL
             branch["transformer"] = true
-            @warn "Branch $k endpoints have different voltage levels, converting to transformer."
+            branch["base_power"] = pm_data.data["baseMVA"]
+            branch["ext"] = Dict{String, Any}()
+            @warn "Branch $(branch["f_bus"]) - $(branch["t_bus"]) has different voltage levels endpoints (from: $(f_bus_bvolt)kV, to: $(t_bus_bvolt)kV) which exceed the $(BRANCH_BUS_VOLTAGE_DIFFERENCE_TOL*100)% threshold; converting to transformer."
+            if !haskey(branch, "base_voltage_from")
+                branch["base_voltage_from"] = f_bus_bvolt
+                branch["base_voltage_to"] = t_bus_bvolt
+            end
         end
     end
 end
 
 """
-Internal component name retreval from pm2ps_dict
+Internal component name retrieval from pm2ps_dict
 """
 function _get_pm_dict_name(device_dict::Dict)::String
-    if haskey(device_dict, "name")
+    if haskey(device_dict, "shunt_bus")
+        # With shunts, we have FixedAdmittance and SwitchedAdmittance types.
+        # To avoid potential name collision, we add the connected bus number to the name.
+        name = join(strip.(string.((device_dict["shunt_bus"], device_dict["name"]))), "-")
+    elseif haskey(device_dict, "name")
         name = string(device_dict["name"])
     elseif haskey(device_dict, "source_id")
         name = strip(join(string.(device_dict["source_id"]), "-"))
@@ -112,7 +136,7 @@ function _get_pm_bus_name(device_dict::Dict, unique_names::Bool)
 end
 
 """
-Internal branch name retreval from pm2ps_dict
+Internal branch name retrieval from pm2ps_dict
 """
 function _get_pm_branch_name(device_dict, bus_f::ACBus, bus_t::ACBus)
     # Additional if-else are used to catch line id in PSSe parsing cases
@@ -120,6 +144,14 @@ function _get_pm_branch_name(device_dict, bus_f::ACBus, bus_t::ACBus)
         index = device_dict["name"]
     elseif device_dict["source_id"][1] == "branch" && length(device_dict["source_id"]) > 2
         index = strip(device_dict["source_id"][4])
+    elseif (
+        device_dict["source_id"][1] == "switch" || device_dict["source_id"][1] == "breaker"
+    ) && length(device_dict["source_id"]) > 2
+        # CKT is either a plain circuit id (v35 SWITCHING DEVICE, e.g. "1 ") or carries a
+        # legacy branch-embedded marker (@ = breaker, * = switch, e.g. "@1"). Strip the
+        # marker and padding and keep the full remaining id, so distinct circuits on the
+        # same bus pair produce distinct names.
+        index = strip(string(device_dict["source_id"][4]), ['@', '*', ' '])
     elseif device_dict["source_id"][1] == "transformer" &&
            length(device_dict["source_id"]) > 3
         index = strip(device_dict["source_id"][5])
@@ -129,6 +161,217 @@ function _get_pm_branch_name(device_dict, bus_f::ACBus, bus_t::ACBus)
     return "$(get_name(bus_f))-$(get_name(bus_t))-i_$index"
 end
 
+function _is_psse_branch_source_id(device_dict::Dict)
+    if !haskey(device_dict, "source_id") || isempty(device_dict["source_id"])
+        return false
+    end
+
+    source_type = device_dict["source_id"][1]
+    return source_type in ("branch", "switch", "breaker", "transformer")
+end
+
+function _get_pm_branch_name_with_counter!(
+    device_dict::Dict,
+    bus_f::ACBus,
+    bus_t::ACBus,
+    branch_pair_counts::Dict{Tuple{String, String}, Int},
+)
+    if _is_psse_branch_source_id(device_dict)
+        pair_key = (get_name(bus_f), get_name(bus_t))
+        branch_pair_counts[pair_key] = get(branch_pair_counts, pair_key, 0) + 1
+        index = branch_pair_counts[pair_key]
+        return "$(pair_key[1])-$(pair_key[2])-i_$(index)"
+    end
+
+    return _get_pm_branch_name(device_dict, bus_f, bus_t)
+end
+
+"""
+Internal 3WT name retrieval from pm2ps_dict
+"""
+function _get_pm_3w_name(
+    device_dict,
+    bus_primary::ACBus,
+    bus_secondary::ACBus,
+    bus_tertiary::ACBus,
+)
+    ckt = device_dict["circuit"]
+    return "$(get_name(bus_primary))-$(get_name(bus_secondary))-$(get_name(bus_tertiary))-i_$ckt"
+end
+
+"""Add geographic coordinates to all buses using pre-built lookup"""
+function add_geographic_info_to_buses!(sys, substation_data)
+    if isempty(substation_data)
+        @warn "No substation data found"
+        return
+    end
+
+    bus_coords_lookup = Dict{Int, GeographicInfo}()
+
+    for (_, substation) in substation_data
+        if haskey(substation, "nodes") && haskey(substation, "latitude") &&
+           haskey(substation, "longitude")
+            lat, lon = substation["latitude"], substation["longitude"]
+
+            geo_info = GeographicInfo(;
+                geo_json = Dict(
+                    "type" => "Point",
+                    "coordinates" => [lon, lat],
+                ),
+            )
+            for node in substation["nodes"]
+                if haskey(node, "I")
+                    bus_coords_lookup[node["I"]] = geo_info
+                end
+            end
+        end
+    end
+
+    begin_supplemental_attributes_update(sys) do
+        buses_with_coords = 0
+        buses_without_coords = 0
+
+        for bus in get_components(ACBus, sys)
+            bus_number = get_number(bus)
+
+            if haskey(bus_coords_lookup, bus_number)
+                geo_info = bus_coords_lookup[bus_number]
+                add_supplemental_attribute!(sys, bus, geo_info)
+                buses_with_coords += 1
+            else
+                buses_without_coords += 1
+            end
+        end
+
+        @info "Added coordinates to $(buses_with_coords) buses, $(buses_without_coords) buses without coordinates"
+    end
+end
+
+"""
+Parses ITC data from a dictionary and constructs a lookup table
+of piecewise linear scaling functions.
+"""
+function _impedance_correction_table_lookup(data::Dict)
+    ict_instances = Dict{Tuple{Int64, WindingCategory}, ImpedanceCorrectionData}()
+
+    @info "Reading Impedance Correction Table data"
+    if !haskey(data, "impedance_correction")
+        @info "There is no Impedance Correction Table data in this file"
+        return ict_instances
+    end
+
+    for (_, table_data) in data["impedance_correction"]
+        table_number = table_data["table_number"]
+        x = table_data["tap_or_angle"]
+        y = table_data["scaling_factor"]
+
+        if length(x) == length(y)
+            if length(x) < 2
+                @warn "Skipping impedance correction entry due to insufficient data points ($(length(x)) < 2): $(x)"
+                continue
+            end
+            pwl_data = PiecewiseLinearData([(x[i], y[i]) for i in eachindex(x)])
+            table_type =
+                if (
+                    x[1] >= PSSE_PARSER_TAP_RATIO_LBOUND &&
+                    x[1] <= PSSE_PARSER_TAP_RATIO_UBOUND
+                )
+                    ImpedanceCorrectionTransformerControlMode.TAP_RATIO
+                else
+                    ImpedanceCorrectionTransformerControlMode.PHASE_SHIFT_ANGLE
+                end
+
+            for winding_index in instances(WindingCategory)
+                ict_instances[(table_number, winding_index)] = ImpedanceCorrectionData(;
+                    table_number = table_number,
+                    impedance_correction_curve = pwl_data,
+                    transformer_winding = winding_index,
+                    transformer_control_mode = table_type,
+                )
+            end
+        else
+            throw(
+                DataFormatError(
+                    "Impedance correction mismatch at table $table_number: tap/angle and scaling count differs.",
+                ),
+            )
+        end
+    end
+
+    return ict_instances
+end
+
+"""
+Function to attach ICTs to a single Transformer component.
+"""
+function _attach_single_ict!(
+    sys::System,
+    transformer::Union{TwoWindingTransformer, ThreeWindingTransformer},
+    name::String,
+    d::Dict,
+    table_key::String,
+    winding_idx::WindingCategory,
+    ict_instances::Dict{Tuple{Int64, WindingCategory}, ImpedanceCorrectionData},
+)
+    if isempty(ict_instances)
+        return
+    end
+    if haskey(d, table_key)
+        table_number = d[table_key]
+        cache_key = (table_number, winding_idx)
+        if haskey(ict_instances, cache_key)
+            ict = ict_instances[cache_key]
+            add_supplemental_attribute!(sys, transformer, ict)
+        else
+            @debug "No correction table associated with transformer $name for winding $winding_idx."
+        end
+    end
+    return
+end
+
+"""
+Attaches the corresponding ICT data to a Transformer2W component.
+"""
+function _attach_impedance_correction_tables!(
+    sys::System,
+    transformer::TwoWindingTransformer,
+    name::String,
+    d::Dict,
+    ict_instances::Dict{Tuple{Int64, WindingCategory}, ImpedanceCorrectionData},
+)
+    _attach_single_ict!(
+        sys,
+        transformer,
+        name,
+        d,
+        "correction_table",
+        WindingCategory.TR2W_WINDING,
+        ict_instances,
+    )
+    return
+end
+
+"""
+Attaches the corresponding ICT data to a Transformer3W component.
+"""
+function _attach_impedance_correction_tables!(
+    sys::System,
+    transformer::ThreeWindingTransformer,
+    name::String,
+    d::Dict,
+    ict_instances::Dict{Tuple{Int64, WindingCategory}, ImpedanceCorrectionData},
+)
+    if isempty(ict_instances)
+        return
+    end
+    for winding_category in instances(WindingCategory)
+        winding_category == WindingCategory.TR2W_WINDING && continue
+        key = "$(WINDING_NAMES[winding_category])_correction_table"
+        _attach_single_ict!(sys, transformer, name, d, key, winding_category, ict_instances)
+    end
+    return
+end
+
 """
 Creates a PowerSystems.ACBus from a PowerSystems bus dictionary
 """
@@ -136,6 +379,7 @@ function make_bus(bus_dict::Dict{String, Any})
     bus = ACBus(
         bus_dict["number"],
         bus_dict["name"],
+        bus_dict["available"],
         bus_dict["bustype"],
         bus_dict["angle"],
         bus_dict["voltage"],
@@ -158,6 +402,7 @@ function make_bus(
         Dict{String, Any}(
             "name" => bus_name,
             "number" => bus_number,
+            "available" => d["bus_status"],
             "bustype" => bus_types[d["bus_type"]],
             "angle" => d["va"],
             "voltage" => d["vm"],
@@ -186,6 +431,7 @@ end
 
 function read_bus!(sys::System, data::Dict; kwargs...)
     @info "Reading bus data"
+
     bus_number_to_bus = Dict{Int, ACBus}()
 
     bus_types = instances(ACBusTypes)
@@ -211,19 +457,49 @@ function read_bus!(sys::System, data::Dict; kwargs...)
     default_bus_naming = x -> _get_pm_bus_name(x, unique_bus_names)
 
     _get_name = get(kwargs, :bus_name_formatter, default_bus_naming)
+
+    default_area_naming = string
+    # The formatter for area_name should be a function that transform the Area Int to a String
+    _get_name_area = get(kwargs, :area_name_formatter, default_area_naming)
+
     for (i, (d_key, d)) in enumerate(bus_data)
         # d id the data dict for each bus
         # d_key is bus key
         bus_name = strip(_get_name(d))
         bus_number = Int(d["bus_i"])
 
-        area_name = string(d["area"])
+        area_name = _get_name_area(d["area"])
         area = get_component(Area, sys, area_name)
         if isnothing(area)
             area = Area(area_name)
             add_component!(sys, area; skip_validation = SKIP_PM_VALIDATION)
         end
 
+        # Store area data into ext dictionary
+        ext = Dict{String, Any}(
+            "ARNAME" => "",
+            "I" => "",
+            "ISW" => "",
+            "PDES" => "",
+            "PTOL" => "",
+        )
+        if data["source_type"] == "pti" && haskey(data, "area_interchange")
+            for (_, area_data) in data["area_interchange"]
+                if haskey(area_data, "area_number") &&
+                   string(area_data["area_number"]) == area_name
+                    ext["ARNAME"] = strip(get(area_data, "area_name", ""))
+                    ext["I"] = string(get(area_data, "area_number", ""))
+                    ext["ISW"] = string(get(area_data, "bus_number", ""))
+                    ext["PDES"] = get(area_data, "net_interchange", "")
+                    ext["PTOL"] = get(area_data, "tol_interchange", "")
+                    break  # Only one match is allowed
+                end
+            end
+        end
+        set_ext!(area, ext)
+        if !haskey(d, "bus_status")
+            d["bus_status"] = true
+        end
         bus = make_bus(bus_name, bus_number, d, bus_types, area)
         has_component(ACBus, sys, bus_name) && throw(
             DataFormatError(
@@ -232,24 +508,137 @@ function read_bus!(sys::System, data::Dict; kwargs...)
         )
 
         bus_number_to_bus[bus.number] = bus
-
         add_component!(sys, bus; skip_validation = SKIP_PM_VALIDATION)
+    end
+
+    # ISW is the PSS(R)E area-slack bus number (AREA INTERCHANGE record); mark it SLACK
+    # so it is distinguishable from the system-wide REF bus. Bus numbers here are raw
+    # PSS(R)E "I" values; this parsing path never renumbers buses.
+    if data["source_type"] == "pti" && haskey(data, "area_interchange")
+        for (_, area_data) in data["area_interchange"]
+            isw = get(area_data, "bus_number", 0)
+            iszero(isw) && continue
+            area_name = string(get(area_data, "area_number", ""))
+            if !haskey(bus_number_to_bus, isw)
+                @warn "Area $area_name interchange-control bus (ISW=$isw) was not found among parsed buses; skipping SLACK assignment." _group =
+                    IS.LOG_GROUP_PARSING
+                continue
+            end
+            isw_bus = bus_number_to_bus[isw]
+            isw_bustype = get_bustype(isw_bus)
+            if isw_bustype == ACBusTypes.PV
+                set_bustype!(isw_bus, ACBusTypes.SLACK)
+            elseif isw_bustype == ACBusTypes.REF
+                @debug "Area $area_name interchange-control bus (ISW=$isw) is the system REF bus" _group =
+                    IS.LOG_GROUP_PARSING
+            else
+                @warn "Area $area_name interchange-control bus (ISW=$isw) has bustype $isw_bustype; expected PV or REF. Skipping SLACK assignment." _group =
+                    IS.LOG_GROUP_PARSING
+            end
+        end
+    end
+
+    if data["source_type"] == "pti" && haskey(data, "interarea_transfer")
+        # get Inter-area Transfers as AreaInterchange
+        for (k, d) in data["interarea_transfer"]
+            area_from_name = _get_name_area(d["area_from"])
+            area_to_name = _get_name_area(d["area_to"])
+            transfer_id = get(d, "transfer_id", "1") # 1 by default
+
+            from_area = get_component(Area, sys, area_from_name)
+            to_area = get_component(Area, sys, area_to_name)
+
+            name = "$(area_from_name)_$(area_to_name)_$(transfer_id)"
+            available = true
+            active_power_flow = d["power_transfer"]
+            flow_limits = (from_to = -INFINITE_BOUND, to_from = INFINITE_BOUND)
+
+            ext = Dict{String, Any}(
+                "index" => d["index"],
+                "source_id" => ["interarea_transfer", k],
+            )
+
+            interarea_inter = AreaInterchange(;
+                name = name,
+                available = available,
+                active_power_flow = active_power_flow,
+                from_area = from_area,
+                to_area = to_area,
+                flow_limits = flow_limits,
+                ext = ext,
+            )
+
+            add_component!(sys, interarea_inter; skip_validation = SKIP_PM_VALIDATION)
+        end
     end
 
     return bus_number_to_bus
 end
 
-function make_power_load(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
+function make_interruptible_powerload(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
+    operation_cost = LoadCost(;
+        variable = zero(CostCurve),
+        fixed = 0.0,
+    )
+
     _get_name = get(kwargs, :load_name_formatter, x -> strip(join(x["source_id"])))
-    return PowerLoad(;
+    return InterruptiblePowerLoad(;
         name = _get_name(d),
-        available = true,
+        available = d["status"],
         bus = bus,
         active_power = d["pd"],
         reactive_power = d["qd"],
         max_active_power = d["pd"],
         max_reactive_power = d["qd"],
         base_power = sys_mbase,
+        operation_cost = operation_cost,
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function make_interruptible_standardload(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
+    operation_cost = LoadCost(;
+        variable = zero(CostCurve),
+        fixed = 0.0,
+    )
+
+    _get_name = get(kwargs, :load_name_formatter, x -> strip(join(x["source_id"])))
+    return InterruptibleStandardLoad(;
+        name = _get_name(d),
+        available = d["status"],
+        bus = bus,
+        base_power = sys_mbase,
+        conformity = d["conformity"],
+        operation_cost = operation_cost,
+        constant_active_power = d["pd"],
+        constant_reactive_power = d["qd"],
+        current_active_power = d["pi"],
+        current_reactive_power = d["qi"],
+        impedance_active_power = d["py"],
+        impedance_reactive_power = d["qy"],
+        max_constant_active_power = d["pd"],
+        max_constant_reactive_power = d["qd"],
+        max_current_active_power = d["pi"],
+        max_current_reactive_power = d["qi"],
+        max_impedance_active_power = d["py"],
+        max_impedance_reactive_power = d["qy"],
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function make_power_load(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
+    _get_name = get(kwargs, :load_name_formatter, x -> strip(join(x["source_id"])))
+    return PowerLoad(;
+        name = _get_name(d),
+        available = d["status"],
+        bus = bus,
+        active_power = d["pd"],
+        reactive_power = d["qd"],
+        max_active_power = d["pd"],
+        max_reactive_power = d["qd"],
+        base_power = sys_mbase,
+        conformity = d["conformity"],
+        ext = get(d, "ext", Dict{String, Any}()),
     )
 end
 
@@ -257,7 +646,7 @@ function make_standard_load(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
     _get_name = get(kwargs, :load_name_formatter, x -> strip(join(x["source_id"])))
     return StandardLoad(;
         name = _get_name(d),
-        available = true,
+        available = d["status"],
         bus = bus,
         constant_active_power = d["pd"],
         constant_reactive_power = d["qd"],
@@ -271,6 +660,22 @@ function make_standard_load(d::Dict, bus::ACBus, sys_mbase::Float64; kwargs...)
         max_current_reactive_power = d["qi"],
         max_impedance_active_power = d["py"],
         max_impedance_reactive_power = d["qy"],
+        base_power = sys_mbase,
+        conformity = d["conformity"],
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function make_distributed_generation(load::ElectricLoad, d::Dict, sys_mbase::Float64)
+    return RenewableNonDispatch(;
+        name = string(get_name(load), "_dgen"),
+        available = Bool(d["dgen_status"]),
+        bus = get_bus(load),
+        active_power = d["dgenp"],
+        reactive_power = d["dgenq"],
+        rating = hypot(d["dgenp"], d["dgenq"]),
+        prime_mover_type = PrimeMovers.OT,
+        power_factor = 1.0,
         base_power = sys_mbase,
     )
 end
@@ -287,22 +692,40 @@ function read_loads!(sys::System, data, bus_number_to_bus::Dict{Int, ACBus}; kwa
     for d_key in keys(data["load"])
         d = data["load"][d_key]
         bus = bus_number_to_bus[d["load_bus"]]
-        if data["source_type"] == "pti"
+        is_interruptible = haskey(d, "interruptible")
+        if data["source_type"] == "pti" && is_interruptible && d["interruptible"] != 1
             load = make_standard_load(d, bus, sys_mbase; kwargs...)
             has_component(StandardLoad, sys, get_name(load)) && throw(
                 DataFormatError(
-                    "Found duplicate load names of $(get_name(load)), consider formatting names with `load_name_formatter` kwarg",
+                    "Found duplicate load names of $(summary(load)), consider formatting names with `load_name_formatter` kwarg",
+                ),
+            )
+        elseif data["source_type"] == "pti" && is_interruptible && d["interruptible"] == 1
+            load = make_interruptible_standardload(d, bus, sys_mbase; kwargs...)
+            has_component(InterruptibleStandardLoad, sys, get_name(load)) && throw(
+                DataFormatError(
+                    "Found duplicate interruptible load names of $(summary(load)), consider formatting names with `load_name_formatter` kwarg",
                 ),
             )
         else
             load = make_power_load(d, bus, sys_mbase; kwargs...)
             has_component(PowerLoad, sys, get_name(load)) && throw(
                 DataFormatError(
-                    "Found duplicate load names of $(get_name(load)), consider formatting names with `load_name_formatter` kwarg",
+                    "Found duplicate load names of $(summary(load)), consider formatting names with `load_name_formatter` kwarg",
                 ),
             )
         end
         add_component!(sys, load; skip_validation = SKIP_PM_VALIDATION)
+
+        if get(d, "dgenp", 0.0) != 0.0 || get(d, "dgenq", 0.0) != 0.0
+            dgen = make_distributed_generation(load, d, sys_mbase)
+            has_component(RenewableNonDispatch, sys, get_name(dgen)) && throw(
+                DataFormatError(
+                    "Found duplicate distributed generation names of $(summary(dgen)), consider formatting names with `load_name_formatter` kwarg",
+                ),
+            )
+            add_component!(sys, dgen; skip_validation = SKIP_PM_VALIDATION)
+        end
     end
 end
 
@@ -350,6 +773,18 @@ function read_loadzones!(
     # The formatter for loadzone_name should be a function that transform the LoadZone Int to a String
     _get_name = get(kwargs, :loadzone_name_formatter, default_loadzone_naming)
 
+    @info "Reading Zone data"
+    if !haskey(data, "zone")
+        @info "There is no Zone data in this file"
+    else
+        for (_, v) in data["zone"]
+            zone_number = v["zone_number"]
+            if !(zone_number in zones)
+                @warn "Skipping empty LoadZone $(zone_number)-$(v["zone_name"])"
+            end
+        end
+    end
+
     for zone in zones
         name = _get_name(zone)
         load_zone = make_loadzone(
@@ -365,23 +800,30 @@ function read_loadzones!(
     end
 end
 
-function make_hydro_gen(
+function make_hydro_dispatch(
     gen_name::Union{SubString{String}, String},
     d::Dict,
     bus::ACBus,
     sys_mbase::Float64,
 )
-    ramp_agc = get(d, "ramp_agc", get(d, "ramp_10", get(d, "ramp_30", abs(d["pmax"]))))
     curtailcost = HydroGenerationCost(zero(CostCurve), 0.0)
 
-    base_conversion = sys_mbase / d["mbase"]
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    base_conversion = sys_mbase / mbase
     return HydroDispatch(; # No way to define storage parameters for gens in PM so can only make HydroDispatch
         name = gen_name,
         available = Bool(d["gen_status"]),
         bus = bus,
         active_power = d["pg"] * base_conversion,
         reactive_power = d["qg"] * base_conversion,
-        rating = calculate_rating(d["pmax"], d["qmax"]) * base_conversion,
+        rating = calculate_gen_rating(d["pmax"], d["qmax"], base_conversion),
         prime_mover_type = parse_enum_mapping(PrimeMovers, d["type"]),
         active_power_limits = (
             min = d["pmin"] * base_conversion,
@@ -391,10 +833,50 @@ function make_hydro_gen(
             min = d["qmin"] * base_conversion,
             max = d["qmax"] * base_conversion,
         ),
-        ramp_limits = (up = ramp_agc, down = ramp_agc),
+        ramp_limits = calculate_ramp_limit(d, gen_name, base_conversion),
         time_limits = nothing,
         operation_cost = curtailcost,
-        base_power = d["mbase"],
+        base_power = mbase,
+    )
+end
+
+function make_hydro_reservoir(
+    gen_name::Union{SubString{String}, String},
+    d::Dict,
+    bus::ACBus,
+    sys_mbase::Float64,
+)
+    curtailcost = HydroGenerationCost(zero(CostCurve), 0.0)
+
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    base_conversion = sys_mbase / mbase
+    return HydroDispatch(; # No way to define storage parameters for gens in PM so can only make HydroDispatch
+        name = gen_name,
+        available = Bool(d["gen_status"]),
+        bus = bus,
+        active_power = d["pg"] * base_conversion,
+        reactive_power = d["qg"] * base_conversion,
+        rating = calculate_gen_rating(d["pmax"], d["qmax"], base_conversion),
+        prime_mover_type = parse_enum_mapping(PrimeMovers, d["type"]),
+        active_power_limits = (
+            min = d["pmin"] * base_conversion,
+            max = d["pmax"] * base_conversion,
+        ),
+        reactive_power_limits = (
+            min = d["qmin"] * base_conversion,
+            max = d["qmax"] * base_conversion,
+        ),
+        ramp_limits = calculate_ramp_limit(d, gen_name, base_conversion),
+        time_limits = nothing,
+        operation_cost = curtailcost,
+        base_power = mbase,
     )
 end
 
@@ -405,12 +887,22 @@ function make_renewable_dispatch(
     sys_mbase::Float64,
 )
     cost = RenewableGenerationCost(zero(CostCurve))
-    base_conversion = sys_mbase / d["mbase"]
 
-    rating = calculate_rating(d["pmax"], d["qmax"])
-    if rating > d["mbase"]
-        @warn "rating is larger than base power for $gen_name, setting to $(d["mbase"])"
-        rating = d["mbase"]
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    base_conversion = sys_mbase / mbase
+
+    rating = calculate_gen_rating(d["pmax"], d["qmax"], base_conversion)
+    if rating > mbase
+        @warn "rating is larger than base power for $gen_name, setting to $mbase" _group =
+            IS.LOG_GROUP_PARSING
+        rating = mbase
     end
 
     generator = RenewableDispatch(;
@@ -427,7 +919,7 @@ function make_renewable_dispatch(
         ),
         power_factor = 1.0,
         operation_cost = cost,
-        base_power = d["mbase"],
+        base_power = mbase,
     )
 
     return generator
@@ -439,7 +931,15 @@ function make_renewable_fix(
     bus::ACBus,
     sys_mbase::Float64,
 )
-    base_conversion = sys_mbase / d["mbase"]
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    base_conversion = sys_mbase / mbase
     generator = RenewableNonDispatch(;
         name = gen_name,
         available = Bool(d["gen_status"]),
@@ -449,7 +949,7 @@ function make_renewable_fix(
         rating = float(d["pmax"]) * base_conversion,
         prime_mover_type = parse_enum_mapping(PrimeMovers, d["type"]),
         power_factor = 1.0,
-        base_power = d["mbase"],
+        base_power = mbase,
     )
 
     return generator
@@ -480,6 +980,27 @@ function make_generic_battery(
         base_power = d["thermal_rating"],
     )
     return storage
+end
+
+function _is_likely_motor_load(d::Dict, gen_name::Union{SubString{String}, String})
+    # A motor load is likely if it has a negative active power and a non-zero reactive power.
+    # This is a heuristic and may not be accurate for all cases.
+    # likely_motor_load
+    if d["pmin"] < 0 && d["pmax"] < 0 && d["pg"] < 0
+        @warn "Generator $gen_name is likely a motor load with negative active power: $(d["pg"]) and negative power limits: (min = $(d["pmin"]), max = $(d["pmax"])) \
+        this component will be parsed as a thermal generator with negative active power limits. You can convert the device to a MotorLoad for more accurate modeling."
+    end
+
+    if d["pmin"] == 0 && d["pmax"] == 0 && d["pg"] < 0
+        @warn "Generator $gen_name is likely a motor load with negative active power: $(d["pg"]) and undefined active power limits \
+        this component will be parsed as a thermal generator with negative active power injection. You can convert the device to a MotorLoad for more accurate modeling."
+    end
+
+    if d["pmin"] < 0 && d["pmax"] == 0
+        @warn "Generator $gen_name is likely something that is not a ThermalGenerators with negative power limits: (min = $(d["pmin"]), max = $(d["pmax"])) \
+        this component will be parsed as a thermal generator with negative active power limits. Check this entry for more accurate modeling."
+    end
+    return
 end
 
 # TODO test this more directly?
@@ -540,9 +1061,6 @@ function make_thermal_gen(
         shutdn = tmpcost.shut_down
     end
 
-    # Ignoring due to  GitHub #148: ramp_agc isn't always present. This value may not be correct.
-    ramp_lim = get(d, "ramp_10", get(d, "ramp_30", abs(d["pmax"])))
-
     operation_cost = ThermalGenerationCost(;
         variable = cost,
         fixed = fixed,
@@ -550,12 +1068,30 @@ function make_thermal_gen(
         shut_down = shutdn,
     )
 
-    ext = Dict{String, Any}()
-    if haskey(d, "r_source")
-        ext["z_source"] = (r = d["r_source"], x = d["x_source"])
+    if !haskey(d, "ext")
+        d["ext"] = Dict{String, Float64}()
     end
 
-    base_conversion = sys_mbase / d["mbase"]
+    if haskey(d, "r_source") && haskey(d, "x_source")
+        d["ext"]["r"] = d["r_source"]
+        d["ext"]["x"] = d["x_source"]
+    end
+
+    if haskey(d, "rt_source") && haskey(d, "xt_source")
+        d["ext"]["rt"] = d["rt_source"]
+        d["ext"]["xt"] = d["xt_source"]
+    end
+
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    base_conversion = sys_mbase / mbase
+    _is_likely_motor_load(d, gen_name)
     thermal_gen = ThermalStandard(;
         name = gen_name,
         status = Bool(d["gen_status"]),
@@ -563,7 +1099,7 @@ function make_thermal_gen(
         bus = bus,
         active_power = d["pg"] * base_conversion,
         reactive_power = d["qg"] * base_conversion,
-        rating = calculate_rating(d["pmax"], d["qmax"]) * base_conversion,
+        rating = calculate_gen_rating(d["pmax"], d["qmax"], base_conversion),
         prime_mover_type = parse_enum_mapping(PrimeMovers, d["type"]),
         fuel = parse_enum_mapping(ThermalFuels, d["fuel"]),
         active_power_limits = (
@@ -574,14 +1110,58 @@ function make_thermal_gen(
             min = d["qmin"] * base_conversion,
             max = d["qmax"] * base_conversion,
         ),
-        ramp_limits = (up = ramp_lim, down = ramp_lim),
+        ramp_limits = calculate_ramp_limit(d, gen_name, base_conversion),
         time_limits = nothing,
         operation_cost = operation_cost,
-        base_power = d["mbase"],
-        ext = ext,
+        base_power = mbase,
+        ext = get(d, "ext", Dict{String, Any}()),
     )
 
     return thermal_gen
+end
+
+function make_synchronous_condenser(
+    gen_name::Union{SubString{String}, String},
+    d::Dict,
+    bus::ACBus,
+    sys_mbase::Float64,
+)
+    ext = get(d, "ext", Dict{String, Any}())
+    if haskey(d, "r_source") && haskey(d, "x_source")
+        ext["r"] = d["r_source"]
+        ext["x"] = d["x_source"]
+    end
+
+    if haskey(d, "rt_source") && haskey(d, "xt_source")
+        ext["rt"] = d["rt_source"]
+        ext["xt"] = d["xt_source"]
+    end
+
+    if d["mbase"] != 0.0
+        mbase = d["mbase"]
+    else
+        @warn "Generator $gen_name has base power equal to zero: $(d["mbase"]). Changing it to system base: $sys_mbase" _group =
+            IS.LOG_GROUP_PARSING
+        mbase = sys_mbase
+    end
+
+    # NOTE: qmax and qmin can be both negatives, so this approach is taken for the rating.
+    base_conversion = sys_mbase / mbase
+    synchronous_condenser = SynchronousCondenser(;
+        name = gen_name,
+        available = Bool(d["gen_status"]),
+        bus = bus,
+        reactive_power = d["qg"] * base_conversion,
+        rating = max(abs(d["qmax"]), abs(d["qmin"])) * base_conversion,
+        reactive_power_limits = (
+            min = d["qmin"] * base_conversion,
+            max = d["qmax"] * base_conversion,
+        ),
+        base_power = mbase,
+        ext = ext,
+    )
+
+    return synchronous_condenser
 end
 
 """
@@ -595,9 +1175,12 @@ function read_gen!(sys::System, data::Dict, bus_number_to_bus::Dict{Int, ACBus};
         return nothing
     end
 
-    generator_mapping = get(kwargs, :generator_mapping, nothing)
-    if generator_mapping isa AbstractString || isnothing(generator_mapping)
+    generator_mapping = get(kwargs, :generator_mapping, GENERATOR_MAPPING_FILE_PM)
+    try
         generator_mapping = get_generator_mapping(generator_mapping)
+    catch e
+        @error "Error loading generator mapping $(generator_mapping)"
+        rethrow(e)
     end
 
     sys_mbase = data["baseMVA"]
@@ -614,12 +1197,17 @@ function read_gen!(sys::System, data::Dict, bus_number_to_bus::Dict{Int, ACBus};
         gen_type = get_generator_type(pm_gen["fuel"], pm_gen["type"], generator_mapping)
         if gen_type == ThermalStandard
             generator = make_thermal_gen(gen_name, pm_gen, bus, sys_mbase)
-        elseif gen_type == HydroEnergyReservoir
-            generator = make_hydro_gen(gen_name, pm_gen, bus, sys_mbase)
+        elseif gen_type == HydroDispatch
+            generator = make_hydro_dispatch(gen_name, pm_gen, bus, sys_mbase)
+        elseif gen_type == HydroTurbine
+            # This method adds a
+            generator = make_hydro_reservoir(gen_name, pm_gen, bus, sys_mbase)
         elseif gen_type == RenewableDispatch
             generator = make_renewable_dispatch(gen_name, pm_gen, bus, sys_mbase)
         elseif gen_type == RenewableNonDispatch
             generator = make_renewable_fix(gen_name, pm_gen, bus, sys_mbase)
+        elseif gen_type == SynchronousCondenser
+            generator = make_synchronous_condenser(gen_name, pm_gen, bus, sys_mbase)
         elseif gen_type == EnergyReservoirStorage
             @warn "EnergyReservoirStorage should be defined as a PowerModels storage... Skipping"
             continue
@@ -637,28 +1225,303 @@ function read_gen!(sys::System, data::Dict, bus_number_to_bus::Dict{Int, ACBus};
     end
 end
 
-function make_branch(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
-    primary_shunt = d["b_fr"]
-    alpha = d["shift"]
-    branch_type = get_branch_type(d["tap"], alpha, d["transformer"])
+const _SHIFT_TO_GROUP_MAP = Dict{Float64, WindingGroupNumber}(
+    0.0 => WindingGroupNumber.GROUP_0,
+    -30.0 => WindingGroupNumber.GROUP_1,
+    -150.0 => WindingGroupNumber.GROUP_5,
+    180.0 => WindingGroupNumber.GROUP_6,
+    150.0 => WindingGroupNumber.GROUP_7,
+    30.0 => WindingGroupNumber.GROUP_11,
+)
 
-    if d["transformer"]
-        if branch_type == Line
-            throw(DataFormatError("Data is mismatched; this cannot be a line. $d"))
-        elseif branch_type == Transformer2W
-            value = make_transformer_2w(name, d, bus_f, bus_t)
-        elseif branch_type == TapTransformer
-            value = make_tap_transformer(name, d, bus_f, bus_t)
-        elseif branch_type == PhaseShiftingTransformer
-            value = make_phase_shifting_transformer(name, d, bus_f, bus_t, alpha)
-        else
-            error("Unsupported branch type $branch_type")
+function _add_vector_control_group(d::Dict, angle_key::String, group_key::String)
+    angle = d[angle_key]
+    for (angle_key_deg, group) in _SHIFT_TO_GROUP_MAP
+        if isapprox(rad2deg(angle), angle_key_deg)
+            d[group_key] = group
+            return
         end
-    else
-        value = make_line(name, d, bus_f, bus_t)
+    end
+    d[group_key] = WindingGroupNumber.UNDEFINED
+    return
+end
+
+function get_branch_type_matpower(
+    d::Dict,
+)
+    tap = d["tap"]
+    shift = d["shift"]
+    is_transformer = d["transformer"]
+    if !is_transformer
+        is_transformer = (tap != 0.0) && (tap != 1.0) || (shift != 0.0)
     end
 
+    is_transformer || return Line
+
+    _add_vector_control_group(d, "shift", "group_number")
+
+    is_identity_tap = abs(tap - 1.0) <= IDENTITY_TAP_TOL || tap == 0.0
+    is_zero_shift = abs(shift) <= ZERO_ANGLE_SHIFT_TOL
+
+    if d["group_number"] == WindingGroupNumber.UNDEFINED
+        # Degenerate PST: no recognisable shift → demote
+        if is_zero_shift
+            @warn "PhaseShiftingTransformer with near-zero shift ($(rad2deg(shift))°) normalised to $(is_identity_tap ? "Transformer2W" : "TapTransformer")" _group =
+                IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            return is_identity_tap ? Transformer2W : TapTransformer
+        end
+        return PhaseShiftingTransformer
+    elseif tap != 1.0
+        if is_identity_tap
+            @warn "TapTransformer with near-identity tap ($(tap)) normalised to Transformer2W" _group =
+                IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            return Transformer2W
+        end
+        return TapTransformer
+    else
+        return Transformer2W
+    end
+end
+
+function get_branch_type_psse(
+    d::Dict,
+)
+    if !d["transformer"] && d["br_r"] == 0.0 && d["br_x"] == 0.0
+        return DiscreteControlledACBranch
+    end
+
+    is_transformer = d["transformer"]
+    tap = d["tap"]
+    shift = get(d, "shift", 0.0)
+
+    if !is_transformer
+        if (tap != 0.0) && (tap != 1.0)
+            @warn "Transformer $d has tap ratio $tap, which is not 0.0 or 1.0; this is not a valid value for a Line. Parsing entry as a Transformer"
+            is_transformer = true
+            _add_vector_control_group(d, "shift", "group_number")
+        else
+            return Line
+        end
+    end
+
+    _add_vector_control_group(d, "shift", "group_number")
+    is_tap_controllable, is_alpha_controllable = _determine_control_modes(d, "COD1", "tap")
+
+    is_identity_tap = abs(tap - 1.0) <= IDENTITY_TAP_TOL || tap == 0.0
+    is_zero_shift = abs(shift) <= ZERO_ANGLE_SHIFT_TOL
+
+    if d["group_number"] == WindingGroupNumber.UNDEFINED || is_alpha_controllable
+        # Degenerate PST: controllable but shift is effectively zero → demote
+        if is_zero_shift && !is_alpha_controllable
+            demoted_type =
+                (is_identity_tap && !is_tap_controllable) ? Transformer2W : TapTransformer
+            @warn "PhaseShiftingTransformer with near-zero shift ($(rad2deg(shift))°) normalised to $demoted_type" _group =
+                IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            return demoted_type
+        end
+        return PhaseShiftingTransformer
+    elseif (is_tap_controllable || (tap != 1.0)) &&
+           d["group_number"] != WindingGroupNumber.UNDEFINED
+        # Consider tap control capability when converting component
+        if is_identity_tap && !is_tap_controllable
+            @warn "TapTransformer with near-identity tap ($(tap)) normalised to Transformer2W" _group =
+                IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            return Transformer2W
+        end
+        return TapTransformer
+    elseif !is_tap_controllable && d["group_number"] != WindingGroupNumber.UNDEFINED
+        return Transformer2W
+    else
+        error("Couldn't infer the branch type for branch $d")
+    end
+end
+
+function _normalized_arc_key(f_bus::Int, t_bus::Int)
+    return f_bus <= t_bus ? (f_bus, t_bus) : (t_bus, f_bus)
+end
+
+function _is_near_zero_impedance_line(d::Dict)
+    return iszero(d["br_r"]) && abs(d["br_x"]) <= ZERO_IMPEDANCE_REACTANCE_THRESHOLD
+end
+
+function _is_active_pti_branch(d::Dict)
+    return get(d, "br_status", 0) == 1
+end
+
+function _expected_discrete_state(d::Dict, bus_f::ACBus, bus_t::ACBus)
+    available =
+        _is_active_pti_branch(d) &&
+        get_bustype(bus_f) != ACBusTypes.ISOLATED &&
+        get_bustype(bus_t) != ACBusTypes.ISOLATED
+    status = if available
+        DiscreteControlledBranchStatus.CLOSED
+    else
+        DiscreteControlledBranchStatus.OPEN
+    end
+    return available, status
+end
+
+function _is_active_discrete_branch(br::DiscreteControlledACBranch)
+    return get_available(br) &&
+           get_branch_status(br) == DiscreteControlledBranchStatus.CLOSED
+end
+
+function _collect_parallel_branch_type_overrides(data::Dict{String, Any})
+    overrides = Dict{Tuple{Int, Int}, DataType}()
+    if !haskey(data, "branch") || get(data, "source_type", "") != "pti"
+        return overrides
+    end
+
+    branch_types_by_arc = Dict{Tuple{Int, Int}, Set{DataType}}()
+    has_line_by_arc = Dict{Tuple{Int, Int}, Bool}()
+    line_near_zero_by_arc = Dict{Tuple{Int, Int}, Bool}()
+    for d in values(data["branch"])
+        _is_active_pti_branch(d) || continue
+        arc_key = _normalized_arc_key(d["f_bus"], d["t_bus"])
+        branch_type = get_branch_type_psse(d)
+        push!(get!(branch_types_by_arc, arc_key, Set{DataType}()), branch_type)
+
+        if branch_type == Line
+            has_line_by_arc[arc_key] = true
+            is_near_zero = _is_near_zero_impedance_line(d)
+            line_near_zero_by_arc[arc_key] =
+                get(line_near_zero_by_arc, arc_key, true) && is_near_zero
+        end
+    end
+
+    for (arc_key, branch_types) in branch_types_by_arc
+        if length(branch_types) > 1 &&
+           all(t -> t in (Transformer2W, TapTransformer), branch_types)
+            overrides[arc_key] = TapTransformer
+            @warn "Normalizing mixed parallel transformer types on arc $(arc_key[1])-$(arc_key[2]) to TapTransformer for parser consistency." _group =
+                IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+        elseif length(branch_types) > 1 &&
+               all(t -> t in (Line, DiscreteControlledACBranch), branch_types)
+            all_lines_near_zero =
+                get(has_line_by_arc, arc_key, false) &&
+                get(line_near_zero_by_arc, arc_key, false)
+            if all_lines_near_zero
+                overrides[arc_key] = DiscreteControlledACBranch
+                @warn "Normalizing mixed parallel $(join(branch_types, "/")) on near-zero-impedance arc $(arc_key[1])-$(arc_key[2]) to DiscreteControlledACBranch." _group =
+                    IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            else
+                @warn "Keeping mixed parallel $(join(branch_types, "/")) on arc $(arc_key[1])-$(arc_key[2]) because at least one Line has non-negligible impedance." _group =
+                    IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            end
+        end
+    end
+
+    return overrides
+end
+
+function _collect_existing_discrete_arc_keys(sys::System)
+    arc_keys = Set{Tuple{Int, Int}}()
+    for br in get_components(DiscreteControlledACBranch, sys)
+        _is_active_discrete_branch(br) || continue
+        arc = get_arc(br)
+        from_num = get_number(get_from(arc))
+        to_num = get_number(get_to(arc))
+        push!(arc_keys, _normalized_arc_key(from_num, to_num))
+    end
+    return arc_keys
+end
+
+function make_branch(
+    name::String,
+    d::Dict,
+    bus_f::ACBus,
+    bus_t::ACBus,
+    source_type::String;
+    branch_type_override::Union{DataType, Nothing} = nothing,
+    kwargs...,
+)
+    if !isnothing(branch_type_override) &&
+       branch_type_override == TapTransformer &&
+       !haskey(d, "group_number")
+        _add_vector_control_group(d, "shift", "group_number")
+    end
+
+    if !isnothing(branch_type_override)
+        branch_type = branch_type_override
+    elseif source_type == "matpower"
+        branch_type = get_branch_type_matpower(d)
+    elseif source_type == "pti"
+        branch_type = get_branch_type_psse(d)
+    else
+        error("Source Type $source_type not supported")
+    end
+
+    if d["transformer"] && branch_type == Line
+        throw(
+            DataFormatError(
+                "Branch data mismatched, cannot build the branch correctly for $d",
+            ),
+        )
+    elseif branch_type == DiscreteControlledACBranch
+        value = _make_switch_from_zero_impedance_line(name, d, bus_f, bus_t)
+    elseif branch_type == Transformer2W
+        value = make_transformer_2w(name, d, bus_f, bus_t; kwargs...)
+    elseif branch_type == TapTransformer
+        value = make_tap_transformer(name, d, bus_f, bus_t; kwargs...)
+    elseif branch_type == PhaseShiftingTransformer
+        value = make_phase_shifting_transformer(name, d, bus_f, bus_t; kwargs...)
+    elseif branch_type == Line
+        value = make_line(name, d, bus_f, bus_t)
+    else
+        error("Unsupported branch type $branch_type")
+    end
     return value
+end
+
+function _make_switch_from_zero_impedance_line(
+    name::String,
+    d::Dict,
+    bus_f::ACBus,
+    bus_t::ACBus,
+)
+    pf = get(d, "pf", 0.0)
+    qf = get(d, "qf", 0.0)
+    available_value = d["br_status"] == 1
+    if get_bustype(bus_f) == ACBusTypes.ISOLATED ||
+       get_bustype(bus_t) == ACBusTypes.ISOLATED
+        available_value = false
+    end
+    if available_value == true
+        status_value = DiscreteControlledBranchStatus.CLOSED
+    else
+        status_value = DiscreteControlledBranchStatus.OPEN
+    end
+    @warn "Branch $name has zero or near-zero impedance and available = $available_value; converting to a DiscreteControlledACBranch of type SWITCH with available = $available_value and branch_status = $status_value"
+    return DiscreteControlledACBranch(;
+        name = name,
+        available = Bool(available_value),
+        active_power_flow = pf,
+        reactive_power_flow = qf,
+        arc = Arc(bus_f, bus_t),
+        r = d["br_r"],
+        x = d["br_x"],
+        rating = _get_rating("Line", name, d, "rate_a"),
+        discrete_branch_type = DiscreteControlledBranchType.SWITCH,
+        branch_status = status_value,
+    )
+end
+
+function _get_rating(
+    branch_type::String,
+    name::AbstractString,
+    line_data::Dict,
+    key::String,
+)
+    haskey(line_data, key) || return key == "rate_a" ? INFINITE_BOUND : nothing
+
+    if isapprox(line_data[key], 0.0)
+        @info(
+            "$branch_type $name rating value: $(line_data[key]). Unbounded value implied as per PSSe Manual"
+        )
+        return INFINITE_BOUND
+    else
+        return line_data[key]
+    end
 end
 
 function make_line(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
@@ -669,6 +1532,9 @@ function make_line(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
        get_bustype(bus_t) == ACBusTypes.ISOLATED
         available_value = false
     end
+
+    ext = haskey(d, "ext") ? d["ext"] : Dict{String, Any}()
+
     return Line(;
         name = name,
         available = available_value,
@@ -678,12 +1544,62 @@ function make_line(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
         r = d["br_r"],
         x = d["br_x"],
         b = (from = d["b_fr"], to = d["b_to"]),
-        rating = d["rate_a"],
+        rating = _get_rating("Line", name, d, "rate_a"),
         angle_limits = (min = d["angmin"], max = d["angmax"]),
+        rating_b = _get_rating("Line", name, d, "rate_b"),
+        rating_c = _get_rating("Line", name, d, "rate_c"),
+        ext = ext,
     )
 end
 
-function make_transformer_2w(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
+function make_switch_breaker(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
+    return DiscreteControlledACBranch(;
+        name = name,
+        available = Bool(d["state"]),
+        active_power_flow = d["active_power_flow"],
+        reactive_power_flow = d["reactive_power_flow"],
+        arc = Arc(bus_f, bus_t),
+        r = d["r"],
+        x = d["x"],
+        rating = d["rating"],
+        discrete_branch_type = d["discrete_branch_type"],
+        branch_status = d["state"],
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function read_switch_breaker!(
+    sys::System,
+    data::Dict,
+    bus_number_to_bus::Dict{Int, ACBus},
+    device_type::String;
+    kwargs...,
+)
+    @info "Reading $device_type data"
+    if !haskey(data, device_type)
+        @info "There is no $device_type data in this file"
+        return
+    end
+
+    _get_name = get(kwargs, :branch_name_formatter, _get_pm_branch_name)
+
+    for (_, d) in data[device_type]
+        bus_f = bus_number_to_bus[d["f_bus"]]
+        bus_t = bus_number_to_bus[d["t_bus"]]
+        name = _get_name(d, bus_f, bus_t)
+        value = make_switch_breaker(name, d, bus_f, bus_t)
+
+        add_component!(sys, value; skip_validation = SKIP_PM_VALIDATION)
+    end
+end
+
+function make_transformer_2w(
+    name::String,
+    d::Dict,
+    bus_f::ACBus,
+    bus_t::ACBus;
+    kwargs...,
+)
     pf = get(d, "pf", 0.0)
     qf = get(d, "qf", 0.0)
     available_value = d["br_status"] == 1
@@ -691,6 +1607,7 @@ function make_transformer_2w(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
        get_bustype(bus_t) == ACBusTypes.ISOLATED
         available_value = false
     end
+
     return Transformer2W(;
         name = name,
         available = available_value,
@@ -699,12 +1616,167 @@ function make_transformer_2w(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
         arc = Arc(bus_f, bus_t),
         r = d["br_r"],
         x = d["br_x"],
-        primary_shunt = d["b_fr"],  # TODO: which b ??
-        rating = d["rate_a"],
+        primary_shunt = d["g_fr"] + im * d["b_fr"],
+        winding_group_number = d["group_number"],
+        rating = _get_rating("Transformer2W", name, d, "rate_a"),
+        rating_b = _get_rating("Transformer2W", name, d, "rate_b"),
+        rating_c = _get_rating("Transformer2W", name, d, "rate_c"),
+        base_power = d["base_power"],
+        # for psse inputs, these numbers may be different than the buses' base voltages
+        base_voltage_primary = d["base_voltage_from"],
+        base_voltage_secondary = d["base_voltage_to"],
+        ext = get(d, "ext", Dict{String, Any}()),
     )
 end
 
-function make_tap_transformer(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
+function make_3w_transformer(
+    name::String,
+    d::Dict,
+    bus_primary::ACBus,
+    bus_secondary::ACBus,
+    bus_tertiary::ACBus,
+    star_bus::ACBus,
+)
+    pf = get(d, "pf", 0.0)
+    qf = get(d, "qf", 0.0)
+    return Transformer3W(;
+        name = name,
+        available = d["available"],
+        primary_star_arc = Arc(bus_primary, star_bus),
+        secondary_star_arc = Arc(bus_secondary, star_bus),
+        tertiary_star_arc = Arc(bus_tertiary, star_bus),
+        star_bus = star_bus,
+        active_power_flow_primary = pf,
+        reactive_power_flow_primary = qf,
+        active_power_flow_secondary = pf,
+        reactive_power_flow_secondary = qf,
+        active_power_flow_tertiary = pf,
+        reactive_power_flow_tertiary = qf,
+        r_primary = d["r_primary"],
+        x_primary = d["x_primary"],
+        r_secondary = d["r_secondary"],
+        x_secondary = d["x_secondary"],
+        r_tertiary = d["r_tertiary"],
+        x_tertiary = d["x_tertiary"],
+        rating = d["rating"],
+        r_12 = d["r_12"],
+        x_12 = d["x_12"],
+        r_23 = d["r_23"],
+        x_23 = d["x_23"],
+        r_13 = d["r_13"],
+        x_13 = d["x_13"],
+        base_power_12 = d["base_power_12"],
+        base_power_23 = d["base_power_23"],
+        base_power_13 = d["base_power_13"],
+        base_voltage_primary = d["base_voltage_primary"],
+        base_voltage_secondary = d["base_voltage_secondary"],
+        base_voltage_tertiary = d["base_voltage_tertiary"],
+        g = d["g"],
+        b = d["b"],
+        primary_turns_ratio = d["primary_turns_ratio"],
+        secondary_turns_ratio = d["secondary_turns_ratio"],
+        tertiary_turns_ratio = d["tertiary_turns_ratio"],
+        available_primary = d["available_primary"],
+        available_secondary = d["available_secondary"],
+        available_tertiary = d["available_tertiary"],
+        rating_primary = _get_rating("Transformer3W", name, d, "rating_primary"),
+        rating_secondary = _get_rating("Transformer3W", name, d, "rating_secondary"),
+        rating_tertiary = _get_rating("Transformer3W", name, d, "rating_tertiary"),
+        primary_group_number = d["primary_group_number"],
+        secondary_group_number = d["secondary_group_number"],
+        tertiary_group_number = d["tertiary_group_number"],
+        control_objective_primary = get(d, "COD1", -99),
+        control_objective_secondary = get(d, "COD2", -99),
+        control_objective_tertiary = get(d, "COD3", -99),
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function make_3w_phase_shifting_transformer(
+    name::String,
+    d::Dict,
+    bus_primary::ACBus,
+    bus_secondary::ACBus,
+    bus_tertiary::ACBus,
+    star_bus::ACBus,
+)
+    pf = get(d, "pf", 0.0)
+    qf = get(d, "qf", 0.0)
+    return PhaseShiftingTransformer3W(;
+        name = name,
+        available = d["available"],
+        primary_star_arc = Arc(bus_primary, star_bus),
+        secondary_star_arc = Arc(bus_secondary, star_bus),
+        tertiary_star_arc = Arc(bus_tertiary, star_bus),
+        star_bus = star_bus,
+        active_power_flow_primary = pf,
+        reactive_power_flow_primary = qf,
+        active_power_flow_secondary = pf,
+        reactive_power_flow_secondary = qf,
+        active_power_flow_tertiary = pf,
+        reactive_power_flow_tertiary = qf,
+        r_primary = d["r_primary"],
+        x_primary = d["x_primary"],
+        r_secondary = d["r_secondary"],
+        x_secondary = d["x_secondary"],
+        r_tertiary = d["r_tertiary"],
+        x_tertiary = d["x_tertiary"],
+        rating = d["rating"],
+        r_12 = d["r_12"],
+        x_12 = d["x_12"],
+        r_23 = d["r_23"],
+        x_23 = d["x_23"],
+        r_13 = d["r_13"],
+        x_13 = d["x_13"],
+        α_primary = d["primary_phase_shift_angle"],
+        α_secondary = d["secondary_phase_shift_angle"],
+        α_tertiary = d["tertiary_phase_shift_angle"],
+        base_power_12 = d["base_power_12"],
+        base_power_23 = d["base_power_23"],
+        base_power_13 = d["base_power_13"],
+        base_voltage_primary = d["base_voltage_primary"],
+        base_voltage_secondary = d["base_voltage_secondary"],
+        base_voltage_tertiary = d["base_voltage_tertiary"],
+        g = d["g"],
+        b = d["b"],
+        primary_turns_ratio = d["primary_turns_ratio"],
+        secondary_turns_ratio = d["secondary_turns_ratio"],
+        tertiary_turns_ratio = d["tertiary_turns_ratio"],
+        available_primary = d["available_primary"],
+        available_secondary = d["available_secondary"],
+        available_tertiary = d["available_tertiary"],
+        rating_primary = _get_rating(
+            "PhaseShiftingTransformer3W",
+            name,
+            d,
+            "rating_primary",
+        ),
+        rating_secondary = _get_rating(
+            "PhaseShiftingTransformer3W",
+            name,
+            d,
+            "rating_secondary",
+        ),
+        rating_tertiary = _get_rating(
+            "PhaseShiftingTransformer3W",
+            name,
+            d,
+            "rating_tertiary",
+        ),
+        control_objective_primary = get(d, "COD1", -99),
+        control_objective_secondary = get(d, "COD2", -99),
+        control_objective_tertiary = get(d, "COD3", -99),
+        ext = d["ext"],
+    )
+end
+
+function make_tap_transformer(
+    name::String,
+    d::Dict,
+    bus_f::ACBus,
+    bus_t::ACBus;
+    kwargs...,
+)
     pf = get(d, "pf", 0.0)
     qf = get(d, "qf", 0.0)
     available_value = d["br_status"] == 1
@@ -712,6 +1784,29 @@ function make_tap_transformer(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
        get_bustype(bus_t) == ACBusTypes.ISOLATED
         available_value = false
     end
+
+    ext = haskey(d, "ext") ? d["ext"] : Dict{String, Any}()
+    control_objective_formatter =
+        get(kwargs, :transformer_control_objective_formatter, nothing)
+    control_objective = if control_objective_formatter !== nothing
+        result = control_objective_formatter(name)
+        result !== nothing ? result : get(d, "COD1", -99)
+    else
+        get(d, "COD1", -99)
+    end
+
+    # PSS/e winding-1 tap-control record → first-class controllability fields (PSY #1684). RMI1/RMA1
+    # bound WINDV1; `tap = WINDV1/WINDV2`, so the tap-ratio band is RMI1/WINDV2 … RMA1/WINDV2. CONT1
+    # is the regulated-bus number (sign = control side; 0 = local). The controlled voltage band
+    # [VMI1, VMA1] sets the setpoint at its midpoint.
+    windv2 = Float64(get(ext, "WINDV2", 1.0))
+    rmi = Float64(get(ext, "RMI1", 0.9 * windv2))
+    rma = Float64(get(ext, "RMA1", 1.1 * windv2))
+    ntp = Int(get(ext, "NTP1", 33))
+    ntp < 2 && (ntp = 33)
+    vma = Float64(get(ext, "VMA1", 1.1))
+    vmi = Float64(get(ext, "VMI1", 0.9))
+
     return TapTransformer(;
         name = name,
         available = available_value,
@@ -721,8 +1816,21 @@ function make_tap_transformer(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
         r = d["br_r"],
         x = d["br_x"],
         tap = d["tap"],
-        primary_shunt = d["b_fr"],  # TODO: which b ??
-        rating = d["rate_a"],
+        primary_shunt = d["g_fr"] + im * d["b_fr"],
+        winding_group_number = d["group_number"],
+        base_power = d["base_power"],
+        rating = _get_rating("TapTransformer", name, d, "rate_a"),
+        rating_b = _get_rating("TapTransformer", name, d, "rate_b"),
+        rating_c = _get_rating("TapTransformer", name, d, "rate_c"),
+        # for psse inputs, these numbers may be different than the buses' base voltages
+        base_voltage_primary = d["base_voltage_from"],
+        base_voltage_secondary = d["base_voltage_to"],
+        control_objective = control_objective,
+        tap_limits = (min = rmi / windv2, max = rma / windv2),
+        number_of_tap_positions = ntp,
+        regulated_bus_number = abs(round(Int, Float64(get(ext, "CONT1", 0)))),
+        voltage_setpoint = (vma + vmi) / 2,
+        ext = ext,
     )
 end
 
@@ -730,8 +1838,8 @@ function make_phase_shifting_transformer(
     name::String,
     d::Dict,
     bus_f::ACBus,
-    bus_t::ACBus,
-    alpha::Float64,
+    bus_t::ACBus;
+    kwargs...,
 )
     pf = get(d, "pf", 0.0)
     qf = get(d, "qf", 0.0)
@@ -740,6 +1848,17 @@ function make_phase_shifting_transformer(
        get_bustype(bus_t) == ACBusTypes.ISOLATED
         available_value = false
     end
+
+    ext = haskey(d, "ext") ? d["ext"] : Dict{String, Any}()
+    control_objective_formatter =
+        get(kwargs, :transformer_control_objective_formatter, nothing)
+    control_objective = if control_objective_formatter !== nothing
+        result = control_objective_formatter(name)
+        result !== nothing ? result : get(d, "COD1", -99)
+    else
+        get(d, "COD1", -99)
+    end
+
     return PhaseShiftingTransformer(;
         name = name,
         available = available_value,
@@ -749,17 +1868,24 @@ function make_phase_shifting_transformer(
         r = d["br_r"],
         x = d["br_x"],
         tap = d["tap"],
-        primary_shunt = d["b_fr"],  # TODO: which b ??
-        α = alpha,
-        rating = d["rate_a"],
+        primary_shunt = d["g_fr"] + im * d["b_fr"],
+        α = d["shift"],
+        base_power = d["base_power"],
+        rating = _get_rating("PhaseShiftingTransformer", name, d, "rate_a"),
+        rating_b = _get_rating("PhaseShiftingTransformer", name, d, "rate_b"),
+        rating_c = _get_rating("PhaseShiftingTransformer", name, d, "rate_c"),
+        # for psse inputs, these numbers may be different than the buses' base voltages
+        base_voltage_primary = d["base_voltage_from"],
+        base_voltage_secondary = d["base_voltage_to"],
+        control_objective = control_objective,
+        ext = ext,
     )
 end
 
 function read_branch!(
     sys::System,
     data::Dict,
-    bus_number_to_bus::Dict{Int, ACBus};
-    kwargs...,
+    bus_number_to_bus::Dict{Int, ACBus}; kwargs...,
 )
     @info "Reading branch data"
     if !haskey(data, "branch")
@@ -767,36 +1893,290 @@ function read_branch!(
         return
     end
 
-    _get_name = get(kwargs, :branch_name_formatter, _get_pm_branch_name)
+    _get_name = get(kwargs, :branch_name_formatter, nothing)
+    ict_instances = _impedance_correction_table_lookup(data)
+    branch_pair_counts = Dict{Tuple{String, String}, Int}()
+    branch_type_overrides = _collect_parallel_branch_type_overrides(data)
+    existing_discrete_arc_keys = _collect_existing_discrete_arc_keys(sys)
 
-    for (d_key, d) in data["branch"]
+    source_type = data["source_type"]
+    for d in values(data["branch"])
         bus_f = bus_number_to_bus[d["f_bus"]]
         bus_t = bus_number_to_bus[d["t_bus"]]
-        name = _get_name(d, bus_f, bus_t)
-        value = make_branch(name, d, bus_f, bus_t)
+        arc_key = _normalized_arc_key(d["f_bus"], d["t_bus"])
+        branch_type_override = get(branch_type_overrides, arc_key, nothing)
+        # The arc-level DiscreteControlledACBranch override was determined from active,
+        # near-zero Lines only.  Do not apply it to inactive or non-near-zero Lines:
+        # converting them would lose their impedance data and silently turn a real line
+        # into an ideal switch if it were ever re-activated.
+        if !isnothing(branch_type_override) &&
+           branch_type_override == DiscreteControlledACBranch &&
+           source_type == "pti" &&
+           !(_is_active_pti_branch(d) && _is_near_zero_impedance_line(d))
+            branch_type_override = nothing
+        end
+        if isnothing(branch_type_override) &&
+           source_type == "pti" &&
+           _is_active_pti_branch(d) &&
+           (arc_key in existing_discrete_arc_keys)
+            inferred_branch_type = get_branch_type_psse(d)
+            if inferred_branch_type == Line && _is_near_zero_impedance_line(d)
+                branch_type_override = DiscreteControlledACBranch
+                @warn "Normalizing near-zero-impedance Line on arc $(arc_key[1])-$(arc_key[2]) to DiscreteControlledACBranch because a parallel switch/breaker arc already exists." _group =
+                    IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+            end
+        end
+        name = if isnothing(_get_name)
+            if source_type == "pti"
+                _get_pm_branch_name_with_counter!(d, bus_f, bus_t, branch_pair_counts)
+            else
+                _get_pm_branch_name(d, bus_f, bus_t)
+            end
+        else
+            _get_name(d, bus_f, bus_t)
+        end
+
+        if branch_type_override == DiscreteControlledACBranch &&
+           has_component(DiscreteControlledACBranch, sys, name)
+            existing = get_component(DiscreteControlledACBranch, sys, name)
+            existing_arc = get_arc(existing)
+            existing_arc_key = _normalized_arc_key(
+                get_number(get_from(existing_arc)),
+                get_number(get_to(existing_arc)),
+            )
+            expected_available, expected_status = _expected_discrete_state(d, bus_f, bus_t)
+
+            if existing_arc_key == arc_key &&
+               get_available(existing) == expected_available &&
+               get_branch_status(existing) == expected_status
+                @warn "Skipping near-zero-impedance Line normalization on arc $(arc_key[1])-$(arc_key[2]) because equivalent DiscreteControlledACBranch '$name' already exists (same arc and operating state)." _group =
+                    IS.LOG_GROUP_PARSING maxlog = PS_MAX_LOG
+                continue
+            else
+                throw(
+                    DataFormatError(
+                        "Name collision for DiscreteControlledACBranch '$name' on arc $(arc_key[1])-$(arc_key[2]) with non-equivalent operating state. Existing available=$(get_available(existing)), status=$(get_branch_status(existing)); expected available=$expected_available, status=$expected_status.",
+                    ),
+                )
+            end
+        end
+
+        value = make_branch(
+            name,
+            d,
+            bus_f,
+            bus_t,
+            source_type;
+            branch_type_override = branch_type_override,
+            kwargs...,
+        )
+
+        if !isnothing(value)
+            add_component!(sys, value; skip_validation = SKIP_PM_VALIDATION)
+        else
+            continue
+        end
+
+        if isa(value, TwoWindingTransformer)
+            _attach_impedance_correction_tables!(
+                sys,
+                value,
+                name,
+                d,
+                ict_instances,
+            )
+        end
+    end
+    return
+end
+
+function read_3w_transformer!(
+    sys::System,
+    data::Dict,
+    bus_number_to_bus::Dict{Int, ACBus};
+    kwargs...,
+)
+    @info "Reading 3W transformer data"
+    if !haskey(data, "3w_transformer")
+        @info "There is no 3W transformer data in this file"
+        return
+    end
+
+    _get_name = get(kwargs, :xfrm_3w_name_formatter, _get_pm_3w_name)
+
+    ict_instances = _impedance_correction_table_lookup(data)
+
+    for (_, d) in data["3w_transformer"]
+        bus_primary = bus_number_to_bus[d["bus_primary"]]
+        bus_secondary = bus_number_to_bus[d["bus_secondary"]]
+        bus_tertiary = bus_number_to_bus[d["bus_tertiary"]]
+        star_bus = bus_number_to_bus[d["star_bus"]]
+
+        name = _get_name(d, bus_primary, bus_secondary, bus_tertiary)
+        three_winding_transformer_type = get_three_winding_transformer_type(d)
+        if three_winding_transformer_type == PhaseShiftingTransformer3W
+            value = make_3w_phase_shifting_transformer(
+                name,
+                d,
+                bus_primary,
+                bus_secondary,
+                bus_tertiary,
+                star_bus,
+            )
+        elseif three_winding_transformer_type == Transformer3W
+            value = make_3w_transformer(
+                name,
+                d,
+                bus_primary,
+                bus_secondary,
+                bus_tertiary,
+                star_bus,
+            )
+        else
+            error(
+                "Unsupported three winding transformer type $three_winding_transformer_type",
+            )
+        end
 
         add_component!(sys, value; skip_validation = SKIP_PM_VALIDATION)
+
+        _attach_impedance_correction_tables!(sys, value, name, d, ict_instances)
     end
 end
 
-function make_dcline(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
-    return TwoTerminalHVDCLine(;
-        name = name,
-        available = d["br_status"] == 1,
-        active_power_flow = get(d, "pf", 0.0),
-        arc = Arc(bus_f, bus_t),
-        active_power_limits_from = (min = d["pminf"], max = d["pmaxf"]),
-        active_power_limits_to = (min = d["pmint"], max = d["pmaxt"]),
-        reactive_power_limits_from = (min = d["qminf"], max = d["qmaxf"]),
-        reactive_power_limits_to = (min = d["qmint"], max = d["qmaxt"]),
-        loss = (l0 = d["loss0"], l1 = d["loss1"]),
-    )
+function _determine_control_modes(d::Dict, control_flag::String, tap_key::String)
+    control_code = get(d, control_flag, -99)
+    tap = d[tap_key]
+
+    is_tap_controllable = false
+    is_alpha_controllable = false
+
+    # There is no control
+    if control_code == 0
+        is_tap_controllable = false
+        is_alpha_controllable = false
+        # Reactive Power Control
+    elseif control_code ∈ [1, -1]
+        is_tap_controllable = true
+        is_alpha_controllable = false
+        # Voltage Control
+    elseif control_code ∈ [2, -2]
+        is_tap_controllable = true
+        is_alpha_controllable = false
+        # Active Power Control
+    elseif control_code ∈ [3, -3]
+        is_tap_controllable = true
+        is_alpha_controllable = true
+        # DC Line Control
+    elseif control_code ∈ [4, -4]
+        is_tap_controllable = true
+        is_alpha_controllable = true
+        # Asymmetric Active Power Control
+    elseif control_code ∈ [5, -5]
+        is_tap_controllable = true
+        is_alpha_controllable = true
+    elseif control_code == -99
+        @warn "Can't determine control objective for the transformer from the $(control_flag) field for $d"
+        if d["shift"] != 0.0
+            is_alpha_controllable = true
+        elseif (tap != 0.0) || (tap != 1.0)
+            is_tap_controllable = true
+        else
+            @warn "Can't determine control objective for the other fields. Will return a Transformer2W"
+        end
+    else
+        error(d)
+    end
+    return is_tap_controllable, is_alpha_controllable
+end
+
+function get_three_winding_transformer_type(d::Dict)
+    _add_vector_control_group(d, "primary_phase_shift_angle", "primary_group_number")
+    _add_vector_control_group(d, "secondary_phase_shift_angle", "secondary_group_number")
+    _add_vector_control_group(d, "tertiary_phase_shift_angle", "tertiary_group_number")
+    # NOTE: with current three winding transformer type hierarchy, tap controllable and not controllable three winding transformers are Transformer3W
+    _, primary_is_alpha_controllable =
+        _determine_control_modes(d, "COD1", "primary_turns_ratio")
+    _, secondary_is_alpha_controllable =
+        _determine_control_modes(d, "COD2", "secondary_turns_ratio")
+    _, tertiary_is_alpha_controllable =
+        _determine_control_modes(d, "COD3", "tertiary_turns_ratio")
+    if d["primary_group_number"] == WindingGroupNumber.UNDEFINED ||
+       d["secondary_group_number"] == WindingGroupNumber.UNDEFINED ||
+       d["tertiary_group_number"] == WindingGroupNumber.UNDEFINED ||
+       primary_is_alpha_controllable || secondary_is_alpha_controllable ||
+       tertiary_is_alpha_controllable
+        return PhaseShiftingTransformer3W
+    else
+        return Transformer3W
+    end
+end
+
+function make_dcline(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus, source_type::String)
+    if source_type == "pti"
+        return TwoTerminalLCCLine(;
+            name = name,
+            available = d["available"],
+            arc = Arc(bus_f, bus_t),
+            active_power_flow = get(d, "pf", 0.0),
+            r = d["r"],
+            transfer_setpoint = d["transfer_setpoint"],
+            scheduled_dc_voltage = d["scheduled_dc_voltage"],
+            rectifier_bridges = d["rectifier_bridges"],
+            rectifier_delay_angle_limits = d["rectifier_delay_angle_limits"],
+            rectifier_rc = d["rectifier_rc"],
+            rectifier_xc = d["rectifier_xc"],
+            rectifier_base_voltage = d["rectifier_base_voltage"],
+            inverter_bridges = d["inverter_bridges"],
+            inverter_extinction_angle_limits = d["inverter_extinction_angle_limits"],
+            inverter_rc = d["inverter_rc"],
+            inverter_xc = d["inverter_xc"],
+            inverter_base_voltage = d["inverter_base_voltage"],
+            power_mode = d["power_mode"],
+            switch_mode_voltage = d["switch_mode_voltage"],
+            compounding_resistance = d["compounding_resistance"],
+            min_compounding_voltage = d["min_compounding_voltage"],
+            rectifier_transformer_ratio = d["rectifier_transformer_ratio"],
+            rectifier_tap_setting = d["rectifier_tap_setting"],
+            rectifier_tap_limits = d["rectifier_tap_limits"],
+            rectifier_tap_step = d["rectifier_tap_step"],
+            rectifier_delay_angle = d["rectifier_delay_angle"],
+            rectifier_capacitor_reactance = d["rectifier_capacitor_reactance"],
+            inverter_transformer_ratio = d["inverter_transformer_ratio"],
+            inverter_tap_setting = d["inverter_tap_setting"],
+            inverter_tap_limits = d["inverter_tap_limits"],
+            inverter_tap_step = d["inverter_tap_step"],
+            inverter_extinction_angle = d["inverter_extinction_angle"],
+            inverter_capacitor_reactance = d["inverter_capacitor_reactance"],
+            active_power_limits_from = d["active_power_limits_from"],
+            active_power_limits_to = d["active_power_limits_to"],
+            reactive_power_limits_from = d["reactive_power_limits_from"],
+            reactive_power_limits_to = d["reactive_power_limits_to"],
+            loss = LinearCurve(d["loss1"], d["loss0"]),
+            ext = get(d, "ext", Dict{String, Any}()),
+        )
+    elseif source_type == "matpower"
+        return TwoTerminalGenericHVDCLine(;
+            name = name,
+            available = d["br_status"] == 1,
+            active_power_flow = get(d, "pf", 0.0),
+            arc = Arc(bus_f, bus_t),
+            active_power_limits_from = (min = d["pminf"], max = d["pmaxf"]),
+            active_power_limits_to = (min = d["pmint"], max = d["pmaxt"]),
+            reactive_power_limits_from = (min = d["qminf"], max = d["qmaxf"]),
+            reactive_power_limits_to = (min = d["qmint"], max = d["qmaxt"]),
+            loss = LinearCurve(d["loss1"], d["loss0"]),
+        )
+    else
+        error("Not supported source type for DC lines: $source_type")
+    end
 end
 
 function read_dcline!(
     sys::System,
     data::Dict,
-    bus_number_to_bus::Dict{Int, ACBus};
+    bus_number_to_bus::Dict{Int, ACBus},
+    source_type::String;
     kwargs...,
 )
     @info "Reading DC Line data"
@@ -805,15 +2185,144 @@ function read_dcline!(
         return
     end
 
-    _get_name = get(kwargs, :branch_name_formatter, _get_pm_branch_name)
+    _get_name = get(kwargs, :dcline_name_formatter, _get_pm_branch_name)
 
     for (d_key, d) in data["dcline"]
         d["name"] = get(d, "name", d_key)
         bus_f = bus_number_to_bus[d["f_bus"]]
         bus_t = bus_number_to_bus[d["t_bus"]]
         name = _get_name(d, bus_f, bus_t)
-        dcline = make_dcline(name, d, bus_f, bus_t)
+        dcline = make_dcline(name, d, bus_f, bus_t, source_type)
         add_component!(sys, dcline; skip_validation = SKIP_PM_VALIDATION)
+    end
+end
+
+function make_vscline(name::String, d::Dict, bus_f::ACBus, bus_t::ACBus)
+    return TwoTerminalVSCLine(;
+        name = name,
+        available = d["available"],
+        arc = Arc(bus_f, bus_t),
+        active_power_flow = get(d, "pf", 0.0),
+        rating = d["rating"],
+        active_power_limits_from = (min = d["pminf"], max = d["pmaxf"]),
+        active_power_limits_to = (min = d["pmint"], max = d["pmaxt"]),
+        g = d["r"] == 0.0 ? 0.0 : 1.0 / d["r"],
+        dc_current = get(d, "if", 0.0),
+        reactive_power_from = get(d, "qf", 0.0),
+        dc_control_from = d["dc_control_from"],
+        ac_control_from = d["ac_control_from"],
+        dc_setpoint_from = d["dc_setpoint_from"],
+        ac_setpoint_from = d["ac_setpoint_from"],
+        converter_loss_from = d["converter_loss_from"],
+        max_dc_current_from = d["max_dc_current_from"],
+        rating_from = d["rating_from"],
+        reactive_power_limits_from = (min = d["qminf"], max = d["qmaxf"]),
+        power_factor_weighting_fraction_from = d["power_factor_weighting_fraction_from"],
+        reactive_power_to = get(d, "qt", 0.0),
+        dc_control_to = d["dc_control_to"],
+        ac_control_to = d["ac_control_to"],
+        dc_setpoint_to = d["dc_setpoint_to"],
+        ac_setpoint_to = d["ac_setpoint_to"],
+        converter_loss_to = d["converter_loss_to"],
+        max_dc_current_to = d["max_dc_current_to"],
+        rating_to = d["rating_to"],
+        reactive_power_limits_to = (min = d["qmint"], max = d["qmaxt"]),
+        power_factor_weighting_fraction_to = d["power_factor_weighting_fraction_to"],
+        rated_dc_voltage = get(d, "rated_dc_voltage", 0.0),
+        remote_bus_control_from = get(d, "remote_bus_control_from", 0),
+        remote_bus_control_to = get(d, "remote_bus_control_to", 0),
+        rmpct_from = get(d, "rmpct_from", 100.0),
+        rmpct_to = get(d, "rmpct_to", 100.0),
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function read_vscline!(
+    sys::System,
+    data::Dict,
+    bus_number_to_bus::Dict{Int, ACBus};
+    kwargs...,
+)
+    @info "Reading VSC Line data"
+    if !haskey(data, "vscline")
+        @info "There is no VSC lines data in this file"
+        return
+    end
+
+    _get_name = get(kwargs, :vsc_line_name_formatter, _get_pm_branch_name)
+
+    for (d_key, d) in data["vscline"]
+        d["name"] = get(d, "name", d_key)
+        bus_f = bus_number_to_bus[d["f_bus"]]
+        bus_t = bus_number_to_bus[d["t_bus"]]
+        name = _get_name(d, bus_f, bus_t)
+        vscline = make_vscline(name, d, bus_f, bus_t)
+        add_component!(sys, vscline; skip_validation = SKIP_PM_VALIDATION)
+    end
+end
+
+function get_switched_admittance_control_mode(modsw::Int)
+    if modsw == 0
+        return SwitchedAdmittanceControlMode.FIXED
+    elseif modsw == 1
+        return SwitchedAdmittanceControlMode.DISCRETE_VOLTAGE
+    elseif modsw == 2
+        return SwitchedAdmittanceControlMode.CONTINUOUS_VOLTAGE
+    elseif modsw == 3
+        return SwitchedAdmittanceControlMode.DISCRETE_REACTIVE_PLANT
+    elseif modsw == 4
+        return SwitchedAdmittanceControlMode.DISCRETE_REACTIVE_VSC
+    elseif modsw == 5
+        return SwitchedAdmittanceControlMode.DISCRETE_ADMITTANCE_REMOTE
+    else
+        return SwitchedAdmittanceControlMode.UNDEFINED
+    end
+end
+
+function make_switched_shunt(name::String, d::Dict, bus::ACBus)
+    modsw = get(d["ext"], "MODSW", 0)
+    regulated_bus_number = Int(get(d["ext"], "NREG", get(d["ext"], "SWREM", 0)))
+    params = Dict(
+        :name => name,
+        :available => Bool(d["status"]),
+        :bus => bus,
+        :Y => (d["gs"] + d["bs"]im),
+        :number_of_steps => d["step_number"],
+        :Y_increase => d["y_increment"],
+        :admittance_limits => d["admittance_limits"],
+        :control_mode => get_switched_admittance_control_mode(modsw),
+        :regulated_bus_number => regulated_bus_number,
+        :ext => d["ext"],
+    )
+
+    if haskey(d, "initial_status")
+        params[:initial_status] = d["initial_status"]
+    end
+
+    return SwitchedAdmittance(; params...)
+end
+
+function read_switched_shunt!(
+    sys::System,
+    data::Dict,
+    bus_number_to_bus::Dict{Int, ACBus};
+    kwargs...,
+)
+    @info "Reading switched shunt data"
+    if !haskey(data, "switched_shunt")
+        @info "There is no switched shunt data in this file"
+        return
+    end
+
+    _get_name = get(kwargs, :switched_shunt_name_formatter, _get_pm_dict_name)
+
+    for (d_key, d) in data["switched_shunt"]
+        d["name"] = get(d, "name", d_key)
+        name = _get_name(d)
+        bus = bus_number_to_bus[d["shunt_bus"]]
+        shunt = make_switched_shunt(name, d, bus)
+
+        add_component!(sys, shunt; skip_validation = SKIP_PM_VALIDATION)
     end
 end
 
@@ -824,6 +2333,52 @@ function make_shunt(name::String, d::Dict, bus::ACBus)
         bus = bus,
         Y = (d["gs"] + d["bs"]im),
     )
+end
+
+function make_facts(name::String, d::Dict, bus::ACBus)
+    if d["tbus"] != 0
+        @warn "Series FACTs not supported."
+    end
+
+    if d["control_mode"] > 3
+        throw(DataFormatError("Operation mode not supported."))
+    end
+
+    return FACTSControlDevice(;
+        name = name,
+        available = Bool(d["available"]),
+        bus = bus,
+        control_mode = d["control_mode"],
+        voltage_setpoint = d["voltage_setpoint"],
+        max_shunt_current = d["max_shunt_current"],
+        regulated_bus_number = d["regulated_bus_number"],
+        ext = get(d, "ext", Dict{String, Any}()),
+    )
+end
+
+function read_facts!(
+    sys::System,
+    data::Dict,
+    bus_number_to_bus::Dict{Int, ACBus};
+    kwargs...,
+)
+    @info "Reading FACTS data"
+    if !haskey(data, "facts")
+        @info "There is no facts data in this file"
+        return
+    end
+
+    _get_name = get(kwargs, :bus_name_formatter, _get_pm_dict_name)
+
+    for (d_key, d) in data["facts"]
+        d["name"] = get(d, "name", d_key)
+        name = _get_name(d)
+        bus = bus_number_to_bus[d["bus"]]
+        full_name = "$(d["bus"])_$(name)"
+        facts = make_facts(full_name, d, bus)
+
+        add_component!(sys, facts; skip_validation = SKIP_PM_VALIDATION)
+    end
 end
 
 function read_shunt!(

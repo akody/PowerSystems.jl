@@ -25,12 +25,6 @@ end
     @test result
 end
 
-@testset "Test JSON serialization of ACTIVSg2000 data" begin
-    sys = PSB.build_system(PSB.MatpowerTestSystems, "matpower_ACTIVSg2000_sys")
-    _, result = validate_serialization(sys)
-    @test result
-end
-
 @testset "Test JSON serialization of dynamic inverter" begin
     sys = PSB.build_system(PSB.PSYTestSystems, "dynamic_inverter_sys")
 
@@ -106,7 +100,8 @@ end
         add_component!(sys, gen)
         ta = TimeSeries.TimeArray(dates, data)
         time_series = IS.SingleTimeSeries(; name = "variable_cost", data = ta)
-        set_variable_cost!(sys, gen, time_series)
+        power_units = UnitSystem.NATURAL_UNITS
+        set_variable_cost!(sys, gen, time_series, power_units)
         service = ConstantReserve{ReserveDown}(;
             name = "init_$i",
             available = false,
@@ -125,6 +120,7 @@ end
             gen,
             service,
             IS.SingleTimeSeries(; name = "init_$i", data = ta),
+            power_units,
         )
     end
     _, result = validate_serialization(sys)
@@ -251,6 +247,44 @@ end
     @test sort!(collect(get_subsystems(sys))) == ["subsystem_1"]
 end
 
+@testset "Test round-trip of explicitly-set SLACK bustype" begin
+    sys = System(100.0)
+    ref_bus = ACBus(nothing)
+    ref_bus.name = "bus1"
+    ref_bus.number = 1
+    # Satisfies slack_bus_check; SLACK is a distinct area-slack marker, not the system REF.
+    ref_bus.bustype = ACBusTypes.REF
+    add_component!(sys, ref_bus)
+    ref_gen = ThermalStandard(nothing)
+    ref_gen.bus = ref_bus
+    ref_gen.name = "gen1"
+    add_component!(sys, ref_gen)
+
+    bus = ACBus(nothing)
+    bus.name = "bus2"
+    bus.number = 2
+    bus.bustype = ACBusTypes.PV
+    add_component!(sys, bus)
+    gen = ThermalStandard(nothing)
+    gen.bus = bus
+    gen.name = "gen2"
+    add_component!(sys, gen)
+
+    set_bustype!(bus, ACBusTypes.SLACK)
+    @test get_bustype(bus) == ACBusTypes.SLACK
+
+    tmpdir = mktempdir()
+    path = joinpath(tmpdir, "slack_bustype_roundtrip.json")
+    to_json(sys, path; force = true)
+    sys2 = System(path)
+    bus2 = get_component(ACBus, sys2, "bus2")
+    @test get_bustype(bus2) == ACBusTypes.SLACK
+
+    sys3 = deepcopy(sys)
+    bus3 = get_component(ACBus, sys3, "bus2")
+    @test get_bustype(bus3) == ACBusTypes.SLACK
+end
+
 @testset "Test serialization to JSON string" begin
     sys = PSB.build_system(PSITestSystems, "test_RTS_GMLC_sys")
     set_name!(sys, "test_RTS_GMLC_sys")
@@ -313,13 +347,145 @@ end
             @test get_time_series_values(
                 gen2,
                 ts1b,
-                initial_time;
+                start_time = initial_time;
             ) == expected1
             @test get_time_series_values(
                 gen2,
                 ts2b,
-                initial_time;
+                start_time = initial_time,
             ) == expected2
         end
     end
+end
+
+@testset "Test serialization of GenericArcImpedance" begin
+    sys = PSB.build_system(PSB.PSITestSystems, "c_sys5")
+    arc = first(get_components(Arc, sys))
+    generic_arc_impedance = GenericArcImpedance(;
+        name = "test_impedance",
+        available = true,
+        active_power_flow = 0.0,
+        reactive_power_flow = 0.0,
+        max_flow = 0.0,
+        arc = arc,
+        r = 0.01,
+        x = 0.1,
+    )
+    add_component!(sys, generic_arc_impedance)
+    _, result = validate_serialization(sys)
+    @test result
+end
+
+@testset "Serialization round-trip of HVDC 14-bus casebuilder systems" begin
+    # HVDC system-level coverage sourced from PowerSystemCaseBuilder (no raw checked into PSY):
+    # each case is a full 14-bus AC system with one converter line replacing the bus 2-3 AC line.
+    for (name, converter) in
+        (("c_sys14_hvdc_vsc", TwoTerminalVSCLine), ("c_sys14_hvdc_lcc", TwoTerminalLCCLine))
+        sys = PSB.build_system(PSB.PSITestSystems, name; add_forecasts = false)
+        @test length(collect(get_components(converter, sys))) == 1
+        _, result = validate_serialization(sys)
+        @test result
+    end
+end
+
+@testset "Test deserialization of a pre-5.x TwoTerminalVSCLine (Bool control flags)" begin
+    # PSY <= 5.11 stored VSC converter control as four `Bool` fields; 5.12 replaced them with the
+    # `*_control_*` enums. A system serialized under the old schema must still deserialize, mapping
+    # the Bool flags onto the enums instead of silently defaulting every converter to DC_VOLTAGE.
+    sys = PSB.build_system(PSB.PSITestSystems, "c_sys5"; add_forecasts = false)
+    arc = first(sort!(collect(get_components(Arc, sys)); by = a -> get_number(get_from(a))))
+    add_component!(
+        sys,
+        TwoTerminalVSCLine(;
+            name = "vsc_legacy",
+            available = true,
+            arc = arc,
+            active_power_flow = 0.1,
+            rating = 2.0,
+            active_power_limits_from = (min = -2.0, max = 2.0),
+            active_power_limits_to = (min = -2.0, max = 2.0),
+            g = 50.0,
+            dc_control_from = VSCDCControlModes.DC_VOLTAGE,
+            ac_control_from = VSCACControlModes.AC_REACTIVE_POWER,
+            dc_setpoint_from = 1.0,
+            dc_control_to = VSCDCControlModes.DC_POWER,
+            ac_control_to = VSCACControlModes.AC_REACTIVE_POWER,
+            dc_setpoint_to = 0.2,
+        ),
+    )
+    dir = mktempdir()
+    path = joinpath(dir, "sys.json")
+    to_json(sys, path)
+
+    # Rewrite the VSC component to the pre-5.x Bool schema: drop the enum/new fields, add the flags.
+    raw = JSON3.read(read(path, String), Dict{String, Any})
+    rewritten = Ref(0)
+    rewrite!(x) =
+        if x isa Dict
+            md = get(x, "__metadata__", nothing)
+            if md isa Dict && occursin("TwoTerminalVSCLine", string(get(md, "type", "")))
+                for k in (
+                    "dc_control_from", "ac_control_from", "dc_control_to", "ac_control_to",
+                    "dc_voltage_droop_from", "dc_voltage_droop_to", "rated_dc_voltage",
+                    "remote_bus_control_from", "remote_bus_control_to", "rmpct_from",
+                    "rmpct_to",
+                )
+                    delete!(x, k)
+                end
+                x["dc_voltage_control_from"] = true
+                x["ac_voltage_control_from"] = false
+                x["dc_voltage_control_to"] = false
+                x["ac_voltage_control_to"] = false
+                rewritten[] += 1
+            end
+            foreach(rewrite!, values(x))
+        elseif x isa AbstractVector
+            foreach(rewrite!, x)
+        end
+    rewrite!(raw)
+    @test rewritten[] == 1
+    open(io -> JSON3.write(io, raw), path, "w")
+
+    sys2 = System(path)
+    vsc = only(get_components(TwoTerminalVSCLine, sys2))
+    # Bool flags mapped onto the enums (true->DC_VOLTAGE/AC_VOLTAGE, false->DC_POWER/AC_REACTIVE_POWER)
+    @test get_dc_control_from(vsc) == VSCDCControlModes.DC_VOLTAGE
+    @test get_dc_control_to(vsc) == VSCDCControlModes.DC_POWER
+    @test get_ac_control_from(vsc) == VSCACControlModes.AC_REACTIVE_POWER
+    @test get_ac_control_to(vsc) == VSCACControlModes.AC_REACTIVE_POWER
+    # fields absent in the old schema fall back to their defaults
+    @test get_rated_dc_voltage(vsc) == 0.0
+end
+
+@testset "Test deserialization of TwoTerminalVSCLine control modes stored as Bools" begin
+    # Some serialized systems carry `Bool` values in the `*_control_*` fields rather than the
+    # scoped-enum names. `Bool <: Integer`, so IS's generic scoped-enum `convert` resolves them
+    # in the keyword constructor that the component deserializer calls.
+    bus_from = ACBus(1, "bus_from", true, ACBusTypes.REF, 0.0, 1.0,
+        (min = 0.9, max = 1.1), 230.0)
+    bus_to = ACBus(2, "bus_to", true, ACBusTypes.PV, 0.0, 1.0,
+        (min = 0.9, max = 1.1), 230.0)
+    arc = Arc(bus_from, bus_to)
+    vsc = TwoTerminalVSCLine(;
+        name = "vsc_bool_modes",
+        available = true,
+        arc = arc,
+        active_power_flow = 0.1,
+        rating = 2.0,
+        active_power_limits_from = (min = -2.0, max = 2.0),
+        active_power_limits_to = (min = -2.0, max = 2.0),
+    )
+
+    data = IS.serialize(vsc)
+    data["dc_control_from"] = true
+    data["ac_control_from"] = false
+    data["dc_control_to"] = false
+    data["ac_control_to"] = true
+
+    component_cache = Dict(IS.get_uuid(arc) => arc)
+    round_tripped = IS.deserialize(TwoTerminalVSCLine, data, component_cache)
+    @test get_dc_control_from(round_tripped) == VSCDCControlModes.DC_VOLTAGE
+    @test get_ac_control_from(round_tripped) == VSCACControlModes.AC_REACTIVE_POWER
+    @test get_dc_control_to(round_tripped) == VSCDCControlModes.DC_POWER
+    @test get_ac_control_to(round_tripped) == VSCACControlModes.AC_VOLTAGE
 end

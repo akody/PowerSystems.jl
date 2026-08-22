@@ -314,6 +314,12 @@ function _make_per_unit!(data::Dict{String, <:Any}, mva_base::Real)
         for (i, load) in data["load"]
             _apply_func!(load, "pd", rescale)
             _apply_func!(load, "qd", rescale)
+            _apply_func!(load, "pi", rescale)
+            _apply_func!(load, "qi", rescale)
+            _apply_func!(load, "py", rescale)
+            _apply_func!(load, "qy", rescale)
+            _apply_func!(load, "dgenp", rescale)
+            _apply_func!(load, "dgenq", rescale)
         end
     end
 
@@ -321,6 +327,14 @@ function _make_per_unit!(data::Dict{String, <:Any}, mva_base::Real)
         for (i, shunt) in data["shunt"]
             _apply_func!(shunt, "gs", rescale)
             _apply_func!(shunt, "bs", rescale)
+        end
+    end
+
+    if haskey(data, "switched_shunt")
+        for (i, sw_shunt) in data["switched_shunt"]
+            _apply_func!(sw_shunt, "gs", rescale)
+            _apply_func!(sw_shunt, "bs", rescale)
+            _apply_func!(sw_shunt, "y_increment", rescale)
         end
     end
 
@@ -1444,7 +1458,7 @@ function check_reference_bus(data::Dict{String, <:Any})
         if length(data["gen"]) > 0
             big_gen = _biggest_generator(data["gen"])
             gen_bus = big_gen["gen_bus"]
-            ref_bus = data["bus"]["$(gen_bus)"]
+            ref_bus = data["bus"][gen_bus]
             ref_bus["bus_type"] = 3
             @warn(
                 "no reference bus found, setting bus $(gen_bus) as reference based on generator $(big_gen["index"])"
@@ -1457,6 +1471,7 @@ function check_reference_bus(data::Dict{String, <:Any})
             )
         end
     end
+    return
 end
 
 "find the largest active generator in the network"
@@ -1666,43 +1681,6 @@ function check_switch_parameters(data::Dict{String, <:Any})
     end
 end
 
-"checks bus types are consistent with generator connections, if not, fixes them"
-function correct_bus_types!(data::Dict{String, <:Any})
-    if ismultinetwork(data)
-        error("check_bus_types does not yet support multinetwork data")
-    end
-
-    modified = Set{Int}()
-
-    bus_gens = Dict((i, []) for (i, bus) in data["bus"])
-
-    for (i, gen) in data["gen"]
-        #println(gen)
-        if gen["gen_status"] == 1
-            push!(bus_gens[gen["gen_bus"]], i)
-        end
-    end
-
-    for (i, bus) in data["bus"]
-        if bus["bus_type"] != 4 && bus["bus_type"] != 3
-            bus_gens_count = length(bus_gens[i])
-
-            if bus_gens_count == 0 && bus["bus_type"] != 1
-                @info "no active generators found at bus $(bus["bus_i"]), updating to bus type from $(bus["bus_type"]) to 1" maxlog =
-                    PS_MAX_LOG
-                bus["bus_type"] = 1
-                push!(modified, bus["index"])
-            end
-
-            if bus_gens_count != 0 && bus["bus_type"] != 2
-                @warn "active generators found at bus $(bus["bus_i"]) on bus type $(bus["bus_type"]), i.e. different than 2 (PV). Consider checking your data inputs."
-            end
-        end
-    end
-
-    return modified
-end
-
 "checks that parameters for dc lines are reasonable"
 function correct_dcline_limits!(data::Dict{String, Any})
     if ismultinetwork(data)
@@ -1842,7 +1820,6 @@ end
 
 ""
 function _correct_cost_function!(id, comp, type_name)
-    #println(comp)
     modified = false
 
     if "model" in keys(comp) && "cost" in keys(comp)

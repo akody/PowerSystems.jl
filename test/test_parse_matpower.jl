@@ -16,6 +16,7 @@ POWER_MODELS_KEYS = [
 
 badfiles = Dict("case30.m" => PSY.InvalidValue)
 voltage_inconsistent_files = ["RTS_GMLC_original.m", "case5_re.m", "case5_re_uc.m"]
+error_log_files = ["ACTIVSg2000.m", "case_ACTIVSg10k.m"]
 
 @testset "Parse Matpower data files" begin
     files = [x for x in readdir(joinpath(MATPOWER_DIR)) if splitext(x)[2] == ".m"]
@@ -54,7 +55,7 @@ end
 @testset "Parse PowerModel Matpower data files" begin
     files = [
         x for x in readdir(MATPOWER_DIR) if
-        splitext(x)[2] == ".m"
+              splitext(x)[2] == ".m"
     ]
     if length(files) == 0
         @error "No test files in the folder"
@@ -105,4 +106,42 @@ end
         path = joinpath(BAD_DATA, f)
         @test_logs (:error,) match_mode = :any test_parse(path)
     end
+end
+
+@testset "Branch-type tolerance normalizations" begin
+    function _mp_branch_dict(; tap = 1.0, shift = 0.0, transformer = true)
+        return Dict{String, Any}(
+            "tap" => tap,
+            "shift" => shift,
+            "transformer" => transformer,
+        )
+    end
+
+    # Non-transformer → Line
+    d = _mp_branch_dict(; tap = 1.0, shift = 0.0, transformer = false)
+    @test PowerSystems.get_branch_type_matpower(d) == Line
+
+    # Tap well away from 1.0, no shift → TapTransformer
+    d = _mp_branch_dict(; tap = 1.05, shift = 0.0)
+    @test PowerSystems.get_branch_type_matpower(d) == TapTransformer
+
+    # Tap inside IDENTITY_TAP_TOL, no shift → Transformer2W
+    d = _mp_branch_dict(; tap = 1.0 + PowerSystems.IDENTITY_TAP_TOL / 2, shift = 0.0)
+    @test PowerSystems.get_branch_type_matpower(d) == Transformer2W
+
+    # Tap == 0.0 alias with no shift → Transformer2W
+    d = _mp_branch_dict(; tap = 0.0, shift = 0.0)
+    @test PowerSystems.get_branch_type_matpower(d) == Transformer2W
+
+    # Real phase shift → PhaseShiftingTransformer
+    d = _mp_branch_dict(; tap = 1.0, shift = 0.5236)  # ~30°
+    @test PowerSystems.get_branch_type_matpower(d) == PhaseShiftingTransformer
+
+    # Near-zero shift, identity tap → Transformer2W
+    d = _mp_branch_dict(; tap = 1.0, shift = PowerSystems.ZERO_ANGLE_SHIFT_TOL / 2)
+    @test PowerSystems.get_branch_type_matpower(d) == Transformer2W
+
+    # Near-zero shift, non-identity tap → TapTransformer
+    d = _mp_branch_dict(; tap = 1.05, shift = PowerSystems.ZERO_ANGLE_SHIFT_TOL / 2)
+    @test PowerSystems.get_branch_type_matpower(d) == TapTransformer
 end

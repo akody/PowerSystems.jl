@@ -2,6 +2,7 @@ nodes_OMIB = [
     ACBus(
         1, #number
         "Bus 1", #Name
+        true, #available
         "REF", #BusType (REF, PV, PQ)
         0, #Angle in radians
         1.06, #Voltage in pu
@@ -10,7 +11,7 @@ nodes_OMIB = [
         nothing,
         nothing,
     ), #Base voltage in kV
-    ACBus(2, "Bus 2", "PV", 0, 1.045, (min = 0.94, max = 1.06), 69, nothing, nothing),
+    ACBus(2, "Bus 2", true, "PV", 0, 1.045, (min = 0.94, max = 1.06), 69, nothing, nothing),
 ]
 
 static_gen = ThermalStandard(;
@@ -46,7 +47,7 @@ branch_OMIB = [
         0.01, #resistance in pu
         0.05, #reactance in pu
         (from = 0.0, to = 0.0), #susceptance in pu
-        18.046, #rate in MW
+        1.14, #rate in MW
         1.04,
     ),
 ]  #angle limits (-min and max)
@@ -249,9 +250,11 @@ end
         valve_position_limits = (min = 0.3, max = 1.2),
     )
     @test typeI_tg isa PowerSystems.DynamicComponent
+    @test get_frequency_droop(typeI_tg) == 0.02
 
     typeII_tg = TGTypeII(; R = 0.05, T1 = 0.3, T2 = 0.1, τ_limits = (min = 0.1, max = 1.0))
     @test typeII_tg isa PowerSystems.DynamicComponent
+    @test get_frequency_droop(typeII_tg) == 0.05
 
     gast_tg = GasTG(;
         R = 0.05,
@@ -264,6 +267,7 @@ end
         D_turb = 0.0,
     )
     @test gast_tg isa PowerSystems.DynamicComponent
+    @test get_frequency_droop(gast_tg) == 0.05
 
     degov_tg = PSY.DEGOV(;
         T1 = 0.0,
@@ -277,6 +281,7 @@ end
         P_ref = 0.0,
     )
     @test degov_tg isa PowerSystems.DynamicComponent
+    @test get_frequency_droop(degov_tg) == (1/18.0)
 end
 
 ################ AVR Data #####################
@@ -387,7 +392,15 @@ end
     sexs_avr = SEXS(; Ta_Tb = 0.1, Tb = 10.0, K = 100.0, Te = 0.1, V_lim = (-4.0, 5.0))
 
     fixed_tg = TGFixed(; efficiency = 1.0)
-
+    typeI_tg = TGTypeI(;
+        R = 0.02,
+        Ts = 0.1,
+        Tc = 0.45,
+        T3 = 0.0,
+        T4 = 0.0,
+        T5 = 50.0,
+        valve_position_limits = (min = 0.3, max = 1.2),
+    )
     no_pss = PSSFixed(; V_pss = 0.0)
 
     oneDoneQ = OneDOneQMachine(;
@@ -454,6 +467,17 @@ end
     )
     @test Gen3AVR isa PowerSystems.Component
 
+    Gen4AVR = DynamicGenerator(;
+        name = get_name(static_gen),
+        ω_ref = 1.0,
+        machine = oneDoneQ,
+        shaft = BaseShaft,
+        avr = sexs_avr,
+        prime_mover = typeI_tg,
+        pss = no_pss,
+    )
+    @test get_frequency_droop(Gen4AVR) == 0.02
+
     sys = System(100.0)
     for bus in nodes_OMIB
         add_component!(sys, bus)
@@ -482,6 +506,7 @@ end
     @test dynamics[1] == Gen1AVR
     @test get_dynamic_injector(static_gen) == Gen1AVR
     @test get_base_power(static_gen) == get_base_power(Gen1AVR)
+    @test PSY.compare_values(static_gen, deepcopy(static_gen))
 
     remove_component!(sys, Gen1AVR)
     @test isnothing(get_dynamic_injector(static_gen))
@@ -519,6 +544,148 @@ end
     serialized_gen = collect(get_components(DynamicGenerator, sys2))
     @test get_name(retrieved_gen[1]) == get_name(serialized_gen[1])
     cd(orig_dir)
+end
+
+@testset "Replace Dynamic Injector" begin
+    nodes = [
+        ACBus(
+            1,
+            "Bus 1",
+            true,
+            "REF",
+            0,
+            1.06,
+            (min = 0.94, max = 1.06),
+            69,
+            nothing,
+            nothing,
+        ),
+        ACBus(
+            2,
+            "Bus 2",
+            true,
+            "PV",
+            0,
+            1.045,
+            (min = 0.94, max = 1.06),
+            69,
+            nothing,
+            nothing,
+        ),
+    ]
+
+    static = ThermalStandard(;
+        name = "ReplaceTestGen",
+        available = true,
+        status = true,
+        bus = nodes[2],
+        active_power = 0.40,
+        reactive_power = 0.010,
+        rating = 0.5,
+        prime_mover_type = PrimeMovers.ST,
+        fuel = ThermalFuels.COAL,
+        active_power_limits = (min = 0.0, max = 0.40),
+        reactive_power_limits = (min = -0.30, max = 0.30),
+        time_limits = nothing,
+        ramp_limits = nothing,
+        operation_cost = ThermalGenerationCost(
+            CostCurve(LinearCurve(1400.0)),
+            0.0,
+            4.0,
+            2.0,
+        ),
+        base_power = 1.0,
+    )
+
+    branches = [
+        Line(
+            "ReplaceLine1",
+            true,
+            0.0,
+            0.0,
+            Arc(; from = nodes[1], to = nodes[2]),
+            0.01,
+            0.05,
+            (from = 0.0, to = 0.0),
+            1.14,
+            (min = -0.7, max = 0.7),
+        ),
+    ]
+
+    Basic = BaseMachine(; R = 0.0, Xd_p = 0.2995, eq_p = 1.05)
+    BaseShaft = SingleMass(; H = 5.148, D = 2.0)
+    fixed_avr = AVRFixed(; Vf = 1.05, V_ref = 1.0)
+    proportional_avr = AVRSimple(; Kv = 5000.0)
+    fixed_tg = TGFixed(; efficiency = 1.0)
+    no_pss = PSSFixed(; V_pss = 0.0)
+
+    oneDoneQ = OneDOneQMachine(;
+        R = 0.0,
+        Xd = 0.8979,
+        Xq = 0.646,
+        Xd_p = 0.2995,
+        Xq_p = 0.04,
+        Td0_p = 7.4,
+        Tq0_p = 0.033,
+    )
+
+    Gen1 = DynamicGenerator(;
+        name = get_name(static),
+        ω_ref = 1.0,
+        machine = Basic,
+        shaft = BaseShaft,
+        avr = proportional_avr,
+        prime_mover = fixed_tg,
+        pss = no_pss,
+    )
+
+    Gen2 = DynamicGenerator(;
+        name = get_name(static),
+        ω_ref = 1.0,
+        machine = oneDoneQ,
+        shaft = BaseShaft,
+        avr = fixed_avr,
+        prime_mover = fixed_tg,
+        pss = no_pss,
+    )
+
+    sys = System(100.0)
+    for bus in nodes
+        add_component!(sys, bus)
+    end
+    for line in branches
+        add_component!(sys, line)
+    end
+    add_component!(sys, static)
+    add_component!(sys, Gen1, static)
+
+    @test get_dynamic_injector(static) === Gen1
+
+    # Replace the dynamic injector
+    replace_dynamic_injector!(sys, static, Gen2)
+    @test get_dynamic_injector(static) === Gen2
+    @test get_base_power(static) == get_base_power(Gen2)
+
+    # Old dynamic injector should be removed from the system
+    @test length(collect(get_components(DynamicGenerator, sys))) == 1
+
+    # Error: static injector has no dynamic injector
+    remove_component!(sys, Gen2)
+    @test isnothing(get_dynamic_injector(static))
+    @test_throws ArgumentError replace_dynamic_injector!(sys, static, Gen1)
+
+    # Error: name mismatch
+    add_component!(sys, Gen1, static)
+    bad_name_gen = DynamicGenerator(;
+        name = "wrong_name",
+        ω_ref = 1.0,
+        machine = BaseMachine(; R = 0.0, Xd_p = 0.2995, eq_p = 1.05),
+        shaft = SingleMass(; H = 5.148, D = 2.0),
+        avr = AVRSimple(; Kv = 5000.0),
+        prime_mover = TGFixed(; efficiency = 1.0),
+        pss = PSSFixed(; V_pss = 0.0),
+    )
+    @test_throws ArgumentError replace_dynamic_injector!(sys, static, bad_name_gen)
 end
 
 @testset "Generic DER (DERD)" begin

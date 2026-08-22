@@ -1,4 +1,7 @@
-"""Accepts angle_limits as a Float64."""
+"""
+Construct a [`Line`](@ref) accepting `angle_limits` as a `Float64`, converting it to a
+symmetric `(min = -angle_limits, max = angle_limits)` named tuple.
+"""
 function Line(
     name,
     available::Bool,
@@ -25,10 +28,15 @@ function Line(
     )
 end
 
-"""Allows construction with bus type specified as a string for legacy code."""
+"""
+Construct an [`ACBus`](@ref) with `bustype` specified as a `String` for legacy compatibility.
+
+The string is converted to the corresponding [`ACBusTypes`](@ref) enum value.
+"""
 function ACBus(
     number,
     name,
+    available,
     bustype::String,
     angle,
     voltage,
@@ -41,6 +49,7 @@ function ACBus(
     return ACBus(
         number,
         name,
+        available,
         get_enum_value(ACBusTypes, bustype),
         angle,
         voltage,
@@ -53,7 +62,78 @@ function ACBus(
     )
 end
 
-"""Allows construction of a reserve from an iterator."""
+"""
+Construct a [`DiscreteControlledACBranch`](@ref) with enum types specified as strings for legacy compatibility.
+
+The `discrete_branch_type` and `branch_status` strings are converted to the corresponding
+[`DiscreteControlledBranchType`](@ref) and [`DiscreteControlledBranchStatus`](@ref) enum values.
+"""
+function DiscreteControlledACBranch(
+    name,
+    available,
+    arc,
+    active_power_flow,
+    reactive_power_flow,
+    r,
+    x,
+    rating,
+    discrete_branch_type::String,
+    branch_status::String,
+    ext = Dict{String, Any}(),
+    internal = InfrastructureSystemsInternal(),
+)
+    return DiscreteControlledACBranch(
+        name,
+        available,
+        arc,
+        active_power_flow,
+        reactive_power_flow,
+        r,
+        x,
+        rating,
+        get_enum_value(DiscreteControlledBranchType, discrete_branch_type),
+        get_enum_value(DiscreteControlledBranchStatus, branch_status),
+        ext,
+        internal,
+    )
+end
+
+"""
+Construct a [`FACTSControlDevice`](@ref) with `control_mode` specified as a string.
+
+The string is converted to the corresponding [`FACTSOperationModes`](@ref) enum value.
+"""
+function FACTSControlDevice(
+    name,
+    available,
+    bus,
+    control_mode::String,
+    voltage_setpoint,
+    max_shunt_current,
+    reactive_power_required,
+    services = Device[],
+    dynamic_injector = nothing,
+    ext = Dict{String, Any}(),
+    internal = InfrastructureSystemsInternal(),
+)
+    return FACTSControlDevice(
+        name,
+        available,
+        bus,
+        get_enum_value(FACTSOperationModes, control_mode),
+        voltage_setpoint,
+        max_shunt_current,
+        reactive_power_required,
+        services,
+        dynamic_injector,
+        ext,
+        internal,
+    )
+end
+
+"""
+Construct a [`ConstantReserve`](@ref) from a `contributingdevices` iterator, collecting it into a vector.
+"""
 function ConstantReserve(
     name,
     contributingdevices::IS.FlattenIteratorWrapper,
@@ -72,79 +152,11 @@ function ConstantReserve(
     )
 end
 
-function InterruptibleLoad(
-    name,
-    available,
-    bus,
-    model,
-    active_power,
-    reactive_power,
-    max_active_power,
-    max_reactive_power,
-    base_power,
-    operation_cost,
-    services = Device[],
-    dynamic_injector = nothing,
-    ext = Dict{String, Any}(),
-)
-    @warn(
-        "The InterruptibleLoad constructor that accepts a model type has been removed and \\
-  is no longer used. Calling this method will automatically create an InterruptiblePowerLoad"
-    )
-    InterruptiblePowerLoad(
-        name,
-        available,
-        bus,
-        active_power,
-        reactive_power,
-        max_active_power,
-        max_reactive_power,
-        base_power,
-        operation_cost,
-        services,
-        dynamic_injector,
-        ext,
-        InfrastructureSystemsInternal(),
-    )
-end
+"""
+Construct an [`EnergyReservoirStorage`](@ref) without an explicit operational cost.
 
-function InterruptibleLoad(;
-    name,
-    available,
-    bus,
-    model,
-    active_power,
-    reactive_power,
-    max_active_power,
-    max_reactive_power,
-    base_power,
-    operation_cost,
-    services = Device[],
-    dynamic_injector = nothing,
-    ext = Dict{String, Any}(),
-    internal = InfrastructureSystemsInternal(),
-)
-    @warn(
-        "The InterruptibleLoad constructor that accepts a model type has been removed and \\
-  is no longer used. Calling this method will automatically create an InterruptiblePowerLoad"
-    )
-    InterruptiblePowerLoad(
-        name,
-        available,
-        bus,
-        active_power,
-        reactive_power,
-        max_active_power,
-        max_reactive_power,
-        base_power,
-        operation_cost,
-        services,
-        dynamic_injector,
-        ext,
-        internal,
-    )
-end
-
+Uses a default [`StorageCost`](@ref) when `operation_cost` is `nothing`.
+"""
 function EnergyReservoirStorage(
     name::AbstractString,
     available::Bool,

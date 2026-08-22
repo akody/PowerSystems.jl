@@ -52,7 +52,7 @@ IEEE Stabilizing Model PSS.
 - `Ls_lim::Tuple{Float64, Float64}`: PSS output limits for regulator output `(Ls_min, Ls_max)`
 - `Vcu::Float64`: Cutoff limiter upper bound, validation range: `(0, 1.25)`
 - `Vcl::Float64`: Cutoff limiter lower bound, validation range: `(0, 1.0)`
-- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude.
+- `ext::Dict{String, Any}`: (default: `Dict{String, Any}()`) An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation.
 - `states::Vector{Symbol}`: (**Do not modify.**) The [states](@ref S) are:
 	x_p1: 1st filter integration,
 	x_p2: 2nd filter integration, 
@@ -62,7 +62,7 @@ IEEE Stabilizing Model PSS.
 	x_p6: T3/T4 lead-lag integrator, 
 	:x_p7 last integer,
 - `n_states::Int`: (**Do not modify.**) IEEEST has 7 states
-- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEST has 7 [differential](@ref states_list) [states](@ref S)
+- `states_types::Vector{StateTypes}`: (**Do not modify.**) IEEEST has 7 [differential](@ref StateTypes) [states](@ref S)
 - `internal::InfrastructureSystemsInternal`: (**Do not modify.**) PowerSystems.jl internal reference
 """
 mutable struct IEEEST <: PSS
@@ -102,7 +102,7 @@ mutable struct IEEEST <: PSS
     Vcu::Float64
     "Cutoff limiter lower bound"
     Vcl::Float64
-    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation, such as latitude and longitude."
+    "An [*ext*ra dictionary](@ref additional_fields) for users to add metadata that are not used in simulation."
     ext::Dict{String, Any}
     "(**Do not modify.**) The [states](@ref S) are:
 	x_p1: 1st filter integration,
@@ -115,7 +115,7 @@ mutable struct IEEEST <: PSS
     states::Vector{Symbol}
     "(**Do not modify.**) IEEEST has 7 states"
     n_states::Int
-    "(**Do not modify.**) IEEEST has 7 [differential](@ref states_list) [states](@ref S)"
+    "(**Do not modify.**) IEEEST has 7 [differential](@ref StateTypes) [states](@ref S)"
     states_types::Vector{StateTypes}
     "(**Do not modify.**) PowerSystems.jl internal reference"
     internal::InfrastructureSystemsInternal

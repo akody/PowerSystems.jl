@@ -3,6 +3,11 @@ struct PowerFlowDataNetwork
     data::PowerFlowData.Network
 end
 
+# NOTE: this file is not reachable from `System(::AbstractString)` for .raw input (that
+# goes through pm_io/psse.jl + power_models_data.jl). Its `read_bus!` methods below do not
+# apply the ISW area-slack -> ACBusTypes.SLACK mapping that power_models_data.jl's
+# `read_bus!` does; keep that in mind if this path is ever wired up to an entry point.
+
 """
 Constructs PowerFlowDataNetwork from a raw file.
 Currently Supports PSSE data files v30, v32 and v33
@@ -15,7 +20,7 @@ end
 Constructs a System from PowerModelsData.
 
 # Arguments
-- `pfd_data::Union{PowerFlowDataNetwork, Union{String, IO}}`: PowerModels data object or supported
+- `pfd_data::Union{`[`PowerFlowDataNetwork`](@ref)`, Union{String, IO}}`: PowerModels data object or supported
 load flow case (*.m, *.raw)
 
 # Keyword arguments
@@ -161,6 +166,7 @@ function read_bus!(
         bus = ACBus(
             bus_number,
             bus_name,
+            true,
             bus_types[buses.ide[ix]],
             clamp(buses.va[ix] * (π / 180), -π / 2, π / 2),
             buses.vm[ix],
@@ -240,6 +246,7 @@ function read_bus!(
         bus = ACBus(
             bus_number,
             bus_name,
+            true,
             bus_types[buses.ide[ix]],
             clamp(buses.va[ix] * (π / 180), -π / 2, π / 2),
             buses.vm[ix],
@@ -508,7 +515,9 @@ function read_branch!(
                 r = branches.r[ix],
                 x = branches.x[ix],
                 primary_shunt = 0.0,
+                winding_group_number = WindingGroupNumber(0),
                 rating = max_rate,
+                base_power = get_base_power(sys), # add system base power
                 ext = Dict(
                     "line_to_xfr" => true,
                 ),
@@ -679,6 +688,8 @@ function read_branch!(
             x = br_x,
             tap = tap_value,
             primary_shunt = transformers.mag2[ix],
+            winding_group_number = WindingGroupNumber(0),
+            base_power = get_base_power(sys),
             rating = max_rate,
         )
         add_component!(sys, transformer; skip_validation = SKIP_PM_VALIDATION)

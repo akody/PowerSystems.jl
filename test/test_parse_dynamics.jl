@@ -89,6 +89,11 @@ end
             @error("Generator $g not supported")
         end
     end
+    all_gens = collect(get_components(ThermalStandard, sys))
+    sort!(all_gens, by = get_name)
+    static_injector = first(all_gens)
+    @test get_frequency_droop(static_injector) ==
+          static_injector.dynamic_injector.prime_mover.R
 end
 
 @testset "GENCLS dyr parsing" begin
@@ -163,10 +168,17 @@ end
 
 @testset "2000-Bus Parsing" begin
     test_dir = mktempdir()
-    texas2000_raw_file = joinpath(TAMU_DIR, "ACTIVSg2000.RAW")
-    texas2000_dyr_file = joinpath(PSSE_DYR_DIR, "ACTIVSg2000_dynamics.dyr")
-    sys = PSB.build_system(PSB.PSSEParsingTestSystems, "psse_ACTIVSg2000_sys")
+    sys = build_system(PSSEParsingTestSystems, "psse_ACTIVSg2000_sys")
     for g in get_components(ThermalStandard, sys)
+        if isnothing(get_dynamic_injector(g))
+            @error "ThermalStandard $(get_name(g)) should have a dynamic injector"
+        end
+        @test !isnothing(get_dynamic_injector(g))
+    end
+    for g in get_components(SynchronousCondenser, sys)
+        if isnothing(get_dynamic_injector(g))
+            @error "SynchronousCondenser $(get_name(g)) should have a dynamic injector"
+        end
         @test !isnothing(get_dynamic_injector(g))
     end
     path = joinpath(test_dir, "test_dyn_system_serialization_2000.json")

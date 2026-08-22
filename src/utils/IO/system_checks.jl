@@ -1,11 +1,13 @@
 
 ### Utility Functions needed for the construction of the Power System, mostly used for consistency checking ####
 
-## Check that all the buses have a type defintion ##
+## Check that all the buses have a type defintion and that bus types are consistent with generator connections ##
 
-function buscheck(buses)
+function buscheck(sys::System)
+    buses = get_components(ACBus, sys)
     for b in buses
-        if isnothing(b.bustype)
+        b_type = get_bustype(b)
+        if isnothing(b_type)
             @warn "Bus/Nodes data does not contain information to build an a network" maxlog =
                 10
         end
@@ -54,7 +56,7 @@ end
 function critical_components_check(sys::System)
     critical_component_types = [ACBus, Generator, ElectricLoad]
     for component_type in critical_component_types
-        components = get_components(component_type, sys)
+        components = get_available_components(component_type, sys)
         if length(components) == 0
             @warn "There are no $(component_type) Components in the System"
         end
@@ -67,7 +69,7 @@ end
 Checks the system for sum(generator ratings) >= sum(load ratings).
 
 # Arguments
-- `sys::System`: system
+- `sys::`[`System`](@ref): system
 """
 function adequacy_check(sys::System)
     gen = total_capacity_rating(sys)
@@ -79,35 +81,25 @@ end
 """
     total_load_rating(sys::System)
 
-Checks the system for sum(generator ratings) >= sum(load ratings).
+Sum of load ratings.
 
 # Arguments
-- `sys::System`: system
+- `sys::`[`System`](@ref): system
 """
 function total_load_rating(sys::System)
+    # Assumes system is in system base
     base_power = get_base_power(sys)
-    controllable_loads = get_components(ControllableLoad, sys)
-    cl =
-        if isempty(controllable_loads)
-            0.0
-        else
-            sum(get_max_active_power.(controllable_loads)) * base_power
-        end
-    @debug "System has $cl MW of ControllableLoad" _group = IS.LOG_GROUP_SYSTEM_CHECKS
-    static_loads = get_components(StaticLoad, sys)
+    static_loads = get_available_components(StaticLoad, sys)
     sl = isempty(static_loads) ? 0.0 : sum(get_max_active_power.(static_loads)) * base_power
     @debug "System has $sl MW of StaticLoad" _group = IS.LOG_GROUP_SYSTEM_CHECKS
-    # Total load calculation assumes  P = Real(V^2/Y) assuming V=1.0
-    fa_loads = get_components(FixedAdmittance, sys)
-    fa =
-        if isempty(fa_loads)
-            0.0
-        else
-            sum(real.(get_base_voltage.(get_bus.(fa_loads)) .^ 2 ./ get_Y.(fa_loads)))
-        end
-    @debug "System has $fa MW of FixedAdmittance assuming admittance values are in P.U." _group =
-        IS.LOG_GROUP_SYSTEM_CHECKS
-    total_load = cl + sl + fa
+    # Total load calculation for admittances assumes P = Real(V^2*Y) with V=1.0
+    fa_loads = get_available_components(FixedAdmittance, sys)
+    fa = isempty(fa_loads) ? 0.0 : sum(real.(1.0 .* get_Y.(fa_loads))) * base_power
+    @debug "System has $fa MW of FixedAdmittance" _group = IS.LOG_GROUP_SYSTEM_CHECKS
+    sa_loads = get_available_components(SwitchedAdmittance, sys)
+    sa = isempty(sa_loads) ? 0.0 : sum(real.(1.0 .* get_Y.(sa_loads))) * base_power
+    @debug "System has $fa MW of SwitchedAdmittance" _group = IS.LOG_GROUP_SYSTEM_CHECKS
+    total_load = sl + fa + sa
     @debug "Total System Load: $total_load" _group = IS.LOG_GROUP_SYSTEM_CHECKS
     return total_load
 end
@@ -118,12 +110,12 @@ end
 Sum of system generator and storage ratings.
 
 # Arguments
-- `sys::System`: system
+- `sys::`[`System`](@ref): system
 """
 function total_capacity_rating(sys::System)
     total = 0
     for component_type in (Generator, Storage)
-        components = get_components(component_type, sys)
+        components = get_available_components(component_type, sys)
         if !isempty(components)
             component_total = sum(get_rating.(components)) * get_base_power(sys)
             @debug "total rating for $component_type = $component_total" _group =
@@ -134,4 +126,53 @@ function total_capacity_rating(sys::System)
 
     @debug "Total System capacity: $total" _group = IS.LOG_GROUP_SYSTEM_CHECKS
     return total
+end
+
+"""
+    check_parallel_branch_type_consistency(sys::System) -> Int
+
+Scan all two-terminal AC branches for arcs that carry multiple branches of **different**
+PSY types (e.g. a `Transformer2W` in parallel with a `TapTransformer`). Such mixed-type parallel
+groups can introduce issues in the network reduction.
+
+# Example
+```julia
+n = check_parallel_branch_type_consistency(sys)
+n == 0 || @warn "System has \$n arcs with mixed-type parallel branches"
+```
+"""
+function check_parallel_branch_type_consistency(sys::System)
+    # Arc key → [(branch_name, type_string)]
+    arc_entries = Dict{Tuple{Int, Int}, Vector{Tuple{String, String}}}()
+    for branch in get_components(ACBranch, sys)
+        hasmethod(get_arc, Tuple{typeof(branch)}) || continue
+        arc = get_arc(branch)
+        from_num = get_number(get_from(arc))
+        to_num = get_number(get_to(arc))
+        # Normalise orientation so (A,B) and (B,A) resolve to the same key
+        key = from_num <= to_num ? (from_num, to_num) : (to_num, from_num)
+        push!(
+            get!(arc_entries, key, Tuple{String, String}[]),
+            (get_name(branch), string(typeof(branch))),
+        )
+    end
+
+    n_mixed = 0
+    for (arc_key, entries) in arc_entries
+        length(entries) < 2 && continue
+        types = unique(e[2] for e in entries)
+        length(types) == 1 && continue
+        n_mixed += 1
+        names = join((e[1] for e in entries), ", ")
+        type_str = join(types, ", ")
+        @warn "Mixed-type parallel branches on arc $(arc_key[1])-$(arc_key[2]): [$names] " *
+              "with types [$type_str]. This may indicate incomplete or incorrect source data." _group =
+            IS.LOG_GROUP_SYSTEM_CHECKS maxlog = PS_MAX_LOG
+    end
+    if n_mixed > 0
+        @warn "Found $n_mixed arc(s) with mixed-type parallel branches. " *
+              "Consider re-parsing with corrected source data or using `get_components` to inspect." _group =
+            IS.LOG_GROUP_SYSTEM_CHECKS
+    end
+    return n_mixed
 end
